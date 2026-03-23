@@ -25,5 +25,5 @@ const data = await response.json();
 res.status(response.ok ? 200 : 400).json(data);
 } catch (err) { res.status(500).json({error: err.message}); }
 });
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, function() { console.log('OK port ' + PORT); });
