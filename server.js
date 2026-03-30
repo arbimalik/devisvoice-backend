@@ -17,9 +17,19 @@ pool.query(`
     data JSONB NOT NULL,
     artisan_email VARCHAR(255),
     client_email VARCHAR(255),
+    accepted BOOLEAN DEFAULT FALSE,
+    accepted_by VARCHAR(255),
+    accepted_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT NOW()
   )
-`).then(() => console.log('Table devis OK'))
+`).then(() => {
+  return pool.query(`
+    ALTER TABLE devis
+    ADD COLUMN IF NOT EXISTS accepted BOOLEAN DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS accepted_by VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMP
+  `);
+}).then(() => console.log('Table devis OK'))
   .catch(err => console.error('Erreur creation table:', err));
  
 app.post('/api/claude', async (req, res) => {
@@ -53,7 +63,7 @@ app.post('/api/resend', async (req, res) => {
 app.post('/api/devis/save', async (req, res) => {
   const { id, data, artisanEmail, clientEmail } = req.body;
   try {
-        await pool.query(
+    await pool.query(
       'INSERT INTO devis (id, data, artisan_email, client_email) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET data=$2',
       [id, JSON.stringify(data), artisanEmail, clientEmail]
     );
@@ -68,7 +78,23 @@ app.get('/api/devis/:id', async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) { res.status(500).json({error: err.message}); }
 });
- 
+
+// ===== NOUVELLE ROUTE : Acceptation devis =====
+app.post('/api/devis/accept', async (req, res) => {
+  const { id, acceptedBy, acceptedAt } = req.body;
+  if(!id || !acceptedBy) return res.status(400).json({error: 'Paramètres manquants'});
+  try {
+    const check = await pool.query('SELECT accepted FROM devis WHERE id=$1', [id]);
+    if(check.rows.length === 0) return res.status(404).json({error: 'Devis introuvable'});
+    if(check.rows[0].accepted) return res.status(409).json({error: 'Devis déjà accepté', already: true});
+    await pool.query(
+      'UPDATE devis SET accepted=TRUE, accepted_by=$2, accepted_at=$3 WHERE id=$1',
+      [id, acceptedBy, acceptedAt || new Date().toISOString()]
+    );
+    res.json({ success: true, id, acceptedBy });
+  } catch (err) { res.status(500).json({error: err.message}); }
+});
+
 app.post('/api/accept-devis', async (req, res) => {
   const { resendKey, artisanEmail, artisanNom, clientNom, numeroDevis, montantTTC } = req.body;
   try {
