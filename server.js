@@ -93,7 +93,10 @@ app.post('/api/devis/accept', async (req, res) => {
       'UPDATE devis SET accepted=TRUE, accepted_by=$2, accepted_at=$3, signature=$4 WHERE id=$1',
       [id, acceptedBy, acceptedAt || new Date().toISOString(), signature || null]
     );
-    res.json({ success: true, id, acceptedBy });
+    // ✅ FIX : retourner client_email pour que accept.html puisse envoyer l'email sans race condition
+    const updated = await pool.query('SELECT client_email FROM devis WHERE id=$1', [id]);
+    const clientEmail = updated.rows[0]?.client_email || null;
+    res.json({ success: true, id, acceptedBy, clientEmail });
   } catch (err) { res.status(500).json({error: err.message}); }
 });
 
