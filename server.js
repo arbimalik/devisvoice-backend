@@ -168,5 +168,41 @@ app.post('/api/devis/accept', async (req, res) => {
   } catch (err) { res.status(500).json({error: err.message}); }
 });
 
+
+// ===== STATS TABLEAU DE BORD =====
+app.get('/api/stats', async (req, res) => {
+  const email = req.query.email;
+  if(!email) return res.status(400).json({error: 'Email requis'});
+  try {
+    const debut = new Date();
+    debut.setDate(1); debut.setHours(0,0,0,0);
+
+    // Total devis ce mois
+    const totalMois = await pool.query(
+      "SELECT COUNT(*) as count FROM devis WHERE artisan_email=$1 AND created_at >= $2",
+      [email, debut]
+    );
+
+    // Devis acceptés ce mois
+    const acceptesMois = await pool.query(
+      "SELECT COUNT(*) as count, SUM((data->>'total_ttc')::numeric) as montant FROM devis WHERE artisan_email=$1 AND accepted=TRUE AND accepted_at >= $2",
+      [email, debut]
+    );
+
+    // 5 derniers devis
+    const derniers = await pool.query(
+      "SELECT id, data->>'total_ttc' as montant, data->'client'->>'nom' as client, accepted, created_at FROM devis WHERE artisan_email=$1 ORDER BY created_at DESC LIMIT 5",
+      [email]
+    );
+
+    res.json({
+      total_mois: parseInt(totalMois.rows[0].count),
+      acceptes_mois: parseInt(acceptesMois.rows[0].count),
+      montant_mois: parseFloat(acceptesMois.rows[0].montant) || 0,
+      derniers: derniers.rows
+    });
+  } catch(err) { res.status(500).json({error: err.message}); }
+});
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, function() { console.log('OK port ' + PORT); });
