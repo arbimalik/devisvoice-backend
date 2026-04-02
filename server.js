@@ -1,22 +1,23 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
- 
+
 const app = express();
 app.use(cors());
 app.use(express.json({limit: '10mb'}));
- 
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
- 
+
 pool.query(`
   CREATE TABLE IF NOT EXISTS devis (
     id VARCHAR(50) PRIMARY KEY,
     data JSONB NOT NULL,
     artisan_email VARCHAR(255),
     client_email VARCHAR(255),
+    artisan_nom VARCHAR(255),
     accepted BOOLEAN DEFAULT FALSE,
     accepted_by VARCHAR(255),
     accepted_at TIMESTAMP,
@@ -29,11 +30,37 @@ pool.query(`
     ADD COLUMN IF NOT EXISTS accepted BOOLEAN DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS accepted_by VARCHAR(255),
     ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMP,
-    ADD COLUMN IF NOT EXISTS signature TEXT
+    ADD COLUMN IF NOT EXISTS signature TEXT,
+    ADD COLUMN IF NOT EXISTS artisan_nom VARCHAR(255)
   `);
 }).then(() => console.log('Table devis OK'))
   .catch(err => console.error('Erreur creation table:', err));
- 
+
+// ===== HELPER ENVOI EMAIL CENTRALISÉ =====
+// Tous les emails partent depuis devis@devisvoice.fr
+// L'artisan apparaît comme expéditeur via le "from name"
+async function sendEmail({ artisanNom, artisanEmail, to, subject, html }) {
+  const fromName = artisanNom ? `${artisanNom} via DevisVoice` : 'DevisVoice';
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + process.env.RESEND_API_KEY,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      from: `${fromName} <devis@devisvoice.fr>`,
+      reply_to: artisanEmail || 'contact@devisvoice.fr',
+      to: Array.isArray(to) ? to : [to],
+      subject,
+      html
+    })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.message || 'Erreur envoi email');
+  return data;
+}
+
+// ===== API CLAUDE =====
 app.post('/api/claude', async (req, res) => {
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -49,30 +76,65 @@ app.post('/api/claude', async (req, res) => {
     res.json(data);
   } catch (err) { res.status(500).json({error: err.message}); }
 });
- 
-app.post('/api/resend', async (req, res) => {
+
+// ===== ENVOI DEVIS PAR EMAIL =====
+app.post('/api/send-devis', async (req, res) => {
+  const { artisanNom, artisanEmail, clientEmail, subject, html } = req.body;
   try {
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {'Authorization': 'Bearer ' + req.body.apiKey, 'Content-Type': 'application/json'},
-      body: JSON.stringify(req.body.payload)
-    });
-    const data = await response.json();
-    res.status(response.ok ? 200 : 400).json(data);
-  } catch (err) { res.status(500).json({error: err.message}); }
+    const data = await sendEmail({ artisanNom, artisanEmail, to: clientEmail, subject, html });
+    res.json({ success: true, data });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
- 
+
+// ===== ENVOI EMAIL ACCEPTATION =====
+app.post('/api/send-acceptation', async (req, res) => {
+  const { artisanNom, artisanEmail, clientEmail, clientNom, numero, montant, sigB64, today } = req.body;
+  try {
+    const sigHtmlArtisan = sigB64
+      ? `<div style="margin:16px 0;border:1px solid #eee;border-radius:8px;padding:10px;text-align:center;background:#fafafa"><p style="font-size:11px;color:#888;margin-bottom:6px">Signature du client</p><img src="${sigB64}" style="max-height:70px;max-width:260px"></div>`
+      : `<p style="font-size:12px;color:#aaa;font-style:italic">Acceptation sans signature manuscrite.</p>`;
+
+    const sigHtmlClient = sigB64
+      ? `<div style="margin:16px 0;border:1px solid #eee;border-radius:8px;padding:10px;text-align:center;background:#fafafa"><p style="font-size:11px;color:#888;margin-bottom:6px">Votre signature</p><img src="${sigB64}" style="max-height:70px;max-width:260px"></div>`
+      : '';
+
+    // Email artisan
+    await sendEmail({
+      artisanNom,
+      artisanEmail,
+      to: artisanEmail,
+      subject: `✅ Devis ${numero} accepté par ${clientNom}`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#222"><div style="background:#FF4500;padding:20px 24px;border-radius:8px 8px 0 0"><h1 style="color:#fff;font-size:18px;margin:0">✅ Devis accepté !</h1></div><div style="background:#fff;padding:24px;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px"><p style="font-size:14px;margin-bottom:16px">Bonne nouvelle ! Votre devis vient d'être accepté.</p><table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:16px"><tr><td style="padding:8px 0;color:#888;border-bottom:1px solid #f0f0f0">Devis</td><td style="padding:8px 0;font-weight:600;border-bottom:1px solid #f0f0f0">${numero}</td></tr><tr><td style="padding:8px 0;color:#888;border-bottom:1px solid #f0f0f0">Client</td><td style="padding:8px 0;font-weight:600;border-bottom:1px solid #f0f0f0">${clientNom}</td></tr><tr><td style="padding:8px 0;color:#888;border-bottom:1px solid #f0f0f0">Montant TTC</td><td style="padding:8px 0;font-weight:600;color:#FF4500;border-bottom:1px solid #f0f0f0">${montant}</td></tr><tr><td style="padding:8px 0;color:#888">Date</td><td style="padding:8px 0;font-weight:600">${today}</td></tr></table>${sigHtmlArtisan}<div style="background:#e8f8ef;border-radius:8px;padding:12px 16px;text-align:center;margin-top:16px"><span style="color:#00a651;font-weight:700;font-size:14px">✓ BON POUR ACCORD — ${clientNom} — ${today}</span></div><p style="font-size:11px;color:#aaa;margin-top:20px;text-align:center">Généré avec DevisVoice</p></div></div>`
+    });
+
+    // Email client
+    if (clientEmail) {
+      await sendEmail({
+        artisanNom,
+        artisanEmail,
+        to: clientEmail,
+        subject: `Confirmation — Devis ${numero} accepté`,
+        html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#222"><div style="background:#111;padding:20px 24px;border-radius:8px 8px 0 0"><h1 style="color:#fff;font-size:18px;margin:0">Confirmation d'acceptation</h1></div><div style="background:#fff;padding:24px;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px"><p style="font-size:14px;margin-bottom:16px">Bonjour ${clientNom},<br><br>Votre acceptation du devis <strong>${numero}</strong> a bien été enregistrée.</p><table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:16px"><tr><td style="padding:8px 0;color:#888;border-bottom:1px solid #f0f0f0">Artisan</td><td style="padding:8px 0;font-weight:600;border-bottom:1px solid #f0f0f0">${artisanNom}</td></tr><tr><td style="padding:8px 0;color:#888;border-bottom:1px solid #f0f0f0">Montant TTC</td><td style="padding:8px 0;font-weight:600;color:#FF4500;border-bottom:1px solid #f0f0f0">${montant}</td></tr><tr><td style="padding:8px 0;color:#888">Date</td><td style="padding:8px 0;font-weight:600">${today}</td></tr></table>${sigHtmlClient}<div style="background:#e8f8ef;border-radius:8px;padding:12px 16px;text-align:center;margin-top:16px"><span style="color:#00a651;font-weight:700;font-size:14px">✓ BON POUR ACCORD — ${clientNom} — ${today}</span></div><p style="font-size:11px;color:#aaa;margin-top:20px;text-align:center">Généré avec DevisVoice</p></div></div>`
+      });
+    }
+
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== SAUVEGARDE DEVIS =====
 app.post('/api/devis/save', async (req, res) => {
-  const { id, data, artisanEmail, clientEmail } = req.body;
+  const { id, data, artisanEmail, artisanNom, clientEmail } = req.body;
   try {
     await pool.query(
-      'INSERT INTO devis (id, data, artisan_email, client_email) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET data=$2',
-      [id, JSON.stringify(data), artisanEmail, clientEmail]
+      'INSERT INTO devis (id, data, artisan_email, artisan_nom, client_email) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO UPDATE SET data=$2, artisan_nom=$4',
+      [id, JSON.stringify(data), artisanEmail, artisanNom, clientEmail]
     );
     res.json({ success: true, id });
   } catch (err) { res.status(500).json({error: err.message}); }
 });
- 
+
+// ===== GET DEVIS =====
 app.get('/api/devis/:id', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM devis WHERE id=$1', [req.params.id]);
@@ -93,26 +155,18 @@ app.post('/api/devis/accept', async (req, res) => {
       'UPDATE devis SET accepted=TRUE, accepted_by=$2, accepted_at=$3, signature=$4 WHERE id=$1',
       [id, acceptedBy, acceptedAt || new Date().toISOString(), signature || null]
     );
-    // ✅ FIX : retourner client_email pour que accept.html puisse envoyer l'email sans race condition
-    const updated = await pool.query('SELECT client_email FROM devis WHERE id=$1', [id]);
-    const clientEmail = updated.rows[0]?.client_email || null;
-    res.json({ success: true, id, acceptedBy, clientEmail });
+    const updated = await pool.query('SELECT client_email, artisan_email, artisan_nom FROM devis WHERE id=$1', [id]);
+    const row = updated.rows[0];
+    res.json({
+      success: true,
+      id,
+      acceptedBy,
+      clientEmail: row?.client_email || null,
+      artisanEmail: row?.artisan_email || null,
+      artisanNom: row?.artisan_nom || null
+    });
   } catch (err) { res.status(500).json({error: err.message}); }
 });
 
-app.post('/api/accept-devis', async (req, res) => {
-  const { resendKey, artisanEmail, artisanNom, clientNom, numeroDevis, montantTTC } = req.body;
-  try {
-    const html = `<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;color:#222"><div style="background:#FF4500;padding:18px 22px;border-radius:8px 8px 0 0"><h1 style="color:#fff;font-size:20px;margin:0">Devis accepte !</h1></div><div style="background:#fff;padding:22px;border:1px solid #eee;border-top:none"><p style="font-size:15px;margin-bottom:16px">Bonjour <strong>${artisanNom}</strong>,</p><p style="font-size:14px;margin-bottom:16px"><strong>${clientNom}</strong> vient d'accepter votre devis.</p><div style="background:#fff8f5;border:1px solid #ffd0b0;border-radius:8px;padding:14px;margin-bottom:16px"><p style="margin:0;font-size:13px;color:#666">Reference</p><p style="margin:4px 0 8px;font-size:18px;font-weight:700;color:#FF4500">${numeroDevis}</p><p style="margin:0;font-size:13px;color:#666">Montant TTC</p><p style="margin:4px 0 0;font-size:18px;font-weight:700;color:#222">${montantTTC}</p></div><p style="font-size:12px;color:#999">Genere avec DevisVoice</p></div></div>`;
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {'Authorization': 'Bearer ' + resendKey, 'Content-Type': 'application/json'},
-      body: JSON.stringify({from:'onboarding@resend.dev', to:[artisanEmail], subject:'Devis '+numeroDevis+' accepte par '+clientNom, html})
-    });
-    const data = await response.json();
-    res.status(response.ok ? 200 : 400).json(data);
-  } catch (err) { res.status(500).json({error: err.message}); }
-});
- 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, function() { console.log('OK port ' + PORT); });
