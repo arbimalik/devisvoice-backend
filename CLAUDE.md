@@ -1,0 +1,324 @@
+# CLAUDE.md — DevisVoice Backend
+
+> Ce fichier est la source de vérité pour toute session de travail avec Claude Code sur ce projet.
+> Lis-le en entier avant d'écrire la moindre ligne de code.
+
+---
+
+## Contexte du projet
+
+**DevisVoice** est une application web qui permet à des artisans de créer, envoyer et faire signer des devis par commande vocale ou saisie manuelle, alimentée par l'IA (Claude d'Anthropic).
+
+Ce dépôt est le **backend** de l'application. Il expose une API REST consommée par un frontend séparé (non présent dans ce repo).
+
+- **Domaine email** : `devisvoice.fr`
+- **Email d'envoi** : `devis@devisvoice.fr`
+- **Provider email** : Resend (`api.resend.com`)
+- **IA** : Claude (Anthropic) via proxy `/api/claude`
+
+---
+
+## Stack technique
+
+| Composant     | Technologie                     |
+|---------------|---------------------------------|
+| Runtime       | Node.js                         |
+| Framework     | Express 4                       |
+| Base de données | PostgreSQL (via `pg` + pool)  |
+| ORM           | Aucun — SQL brut                |
+| Email         | Resend API (fetch natif)        |
+| IA            | Anthropic Claude API (proxy)    |
+| Déploiement   | Variable `PORT` + `DATABASE_URL` (Railway ou similaire) |
+
+### Dépendances (`package.json`)
+```
+express ^4.18.2
+cors    ^2.8.5
+pg      ^8.11.3
+```
+
+### Variables d'environnement requises
+```
+DATABASE_URL       — Connexion PostgreSQL (avec SSL)
+RESEND_API_KEY     — Clé API Resend pour l'envoi d'emails
+ANTHROPIC_API_KEY  — Clé API Anthropic / Claude
+PORT               — Port d'écoute (défaut : 8080)
+```
+
+---
+
+## Architecture du projet
+
+```
+devisvoice-backend/
+├── server.js        — Point d'entrée unique. Contient toute la logique.
+├── package.json     — Dépendances et script de démarrage
+└── CLAUDE.md        — Ce fichier
+```
+
+Le projet est **intentionnellement monolithique** : tout le code est dans `server.js`. Ne pas fragmenter en modules sauf si explicitement demandé.
+
+---
+
+## Base de données
+
+### Table `devis`
+
+```sql
+CREATE TABLE IF NOT EXISTS devis (
+  id            VARCHAR(50) PRIMARY KEY,
+  data          JSONB NOT NULL,          -- Tout le contenu du devis (lignes, totaux, client, etc.)
+  artisan_email VARCHAR(255),
+  client_email  VARCHAR(255),
+  artisan_nom   VARCHAR(255),
+  accepted      BOOLEAN DEFAULT FALSE,
+  accepted_by   VARCHAR(255),           -- Nom du client signataire
+  accepted_at   TIMESTAMP,
+  signature     TEXT,                   -- Signature en base64 (canvas PNG)
+  created_at    TIMESTAMP DEFAULT NOW()
+);
+```
+
+**Champ `data` (JSONB)** — Structure attendue (déduite des requêtes stats) :
+```json
+{
+  "total_ttc": "1234.56",
+  "client": {
+    "nom": "Dupont Marie"
+  }
+}
+```
+
+**Migrations** : gérées au démarrage via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. Pas d'outil de migration externe.
+
+---
+
+## API — Routes existantes
+
+### `POST /api/claude`
+Proxy transparent vers l'API Anthropic. Le frontend envoie `{ payload: { ...anthropicPayload } }`.
+
+### `POST /api/send-devis`
+Envoie le devis PDF/HTML au client par email.
+```json
+{ "artisanNom": "", "artisanEmail": "", "clientEmail": "", "subject": "", "html": "" }
+```
+
+### `POST /api/send-acceptation`
+Envoie deux emails à l'acceptation du devis : un à l'artisan, un au client.
+```json
+{ "artisanNom": "", "artisanEmail": "", "clientEmail": "", "clientNom": "", "numero": "", "montant": "", "sigB64": "", "today": "" }
+```
+- `sigB64` : image PNG en base64 de la signature manuscrite (optionnel)
+
+### `POST /api/devis/save`
+Sauvegarde ou met à jour un devis (upsert sur `id`).
+```json
+{ "id": "", "data": {}, "artisanEmail": "", "artisanNom": "", "clientEmail": "" }
+```
+
+### `GET /api/devis/:id`
+Récupère un devis complet par son identifiant.
+
+### `POST /api/factures/save`
+Crée ou met à jour une facture (upsert sur `id`). Accepte des `lignes` JSONB pour libellés personnalisés indépendants du devis.
+```json
+{ "id": "", "devisId": "", "artisanEmail": "", "clientNom": "", "numero": "", "lignes": [] }
+```
+
+### `GET /api/factures/:id`
+Récupère une facture complète par son identifiant.
+
+### `PATCH /api/factures/:id/statut`
+Met à jour le statut d'une facture. Valeurs acceptées : `non_envoyee`, `envoyee`, `payee`.
+```json
+{ "statut": "payee" }
+```
+
+### `GET /api/factures?email=xxx`
+Liste toutes les factures d'un artisan, triées par date décroissante.
+
+### `GET /api/siret/:siret`
+Recherche une entreprise par son numéro SIRET via l'API publique du service public français (sans clé API).
+Valide le format 14 chiffres. Retourne les infos prêtes à pré-remplir le formulaire client.
+```json
+{ "siret": "", "siren": "", "nom": "", "adresse": "", "code_postal": "", "ville": "", "activite": "" }
+```
+
+### `POST /api/devis/accept`
+Marque un devis comme accepté. Idempotent protégé : retourne `409` si déjà accepté.
+```json
+{ "id": "", "acceptedBy": "", "acceptedAt": "", "signature": "" }
+```
+
+### `GET /api/stats?email=xxx`
+Statistiques mensuelles pour le tableau de bord artisan.
+```json
+{
+  "total_mois": 12,
+  "acceptes_mois": 5,
+  "montant_mois": 8750.00,
+  "derniers": [...]
+}
+```
+
+---
+
+## Helper email centralisé
+
+```js
+sendEmail({ artisanNom, artisanEmail, to, subject, html })
+```
+- Expéditeur affiché : `"${artisanNom} via DevisVoice" <devis@devisvoice.fr>`
+- `reply_to` : email de l'artisan (ou `contact@devisvoice.fr`)
+- Toujours utiliser ce helper, jamais appeler Resend directement
+
+---
+
+## Règles de travail
+
+1. **Langue** : tout le code, les commentaires, les messages d'erreur et les logs sont en français ou anglais technique standard. Les réponses de Claude sont en français.
+
+2. **Fichier unique** : tout le code reste dans `server.js` sauf instruction contraire explicite. Pas de dossiers `routes/`, `controllers/`, `models/` sans demande.
+
+3. **SQL brut** : pas d'ORM (Sequelize, Prisma, etc.). Utiliser `pool.query()` directement.
+
+4. **Migrations au démarrage** : les évolutions de schéma se font avec `ADD COLUMN IF NOT EXISTS` au boot du serveur, dans le bloc d'initialisation existant.
+
+5. **Pas d'auth pour l'instant** : l'artisan est identifié uniquement par son email. Ne pas ajouter de JWT, sessions ou OAuth sans demande explicite.
+
+6. **Emails via `sendEmail()`** : toujours passer par le helper centralisé, ne jamais appeler `fetch('https://api.resend.com/...')` directement ailleurs.
+
+7. **Pas de breaking changes silencieux** : toute modification de la structure de la table `devis` ou du format des réponses API doit être signalée explicitement avant implémentation.
+
+8. **Gestion d'erreurs** : chaque route doit avoir un `try/catch` qui retourne `res.status(500).json({ error: err.message })`.
+
+9. **Sécurité** : ne jamais exposer `DATABASE_URL`, `RESEND_API_KEY` ou `ANTHROPIC_API_KEY` dans les réponses API. Ne jamais construire des requêtes SQL avec des interpolations de chaîne (`${}`) — toujours utiliser les paramètres positionnels (`$1, $2...`).
+
+10. **Tests** : pas de suite de tests automatisés pour l'instant. Tester manuellement via curl ou Postman avant de déclarer une fonctionnalité terminée.
+
+---
+
+## Roadmap
+
+### V1 — En cours
+
+- [x] Couleur des en-têtes de devis liée au thème de l'artisan — `getAccentColor()` + `applyThemeToCSS()` dans `devis-pdf.html`, 4 thèmes (orange clair/foncé, bleu, vert)
+- [x] Recherche client par SIRET via l'API du service public français — `GET /api/siret/:siret`
+- [x] Module factures : libellés personnalisés + nom client — table `factures` + 4 routes
+- [ ] Nom de domaine propre par artisan
+- [ ] Publication App Store (iOS)
+
+### V2 — Planifiée
+
+- [ ] Onglet "Chantier en cours" avec validation de fin de chantier et envoi automatique de la facture au client et au comptable
+- [ ] Zone texte dictée à la voix pour les impératifs / remarques du chantier
+- [ ] Suivi des factures : statut payée ou en attente
+- [ ] Champ email comptable dans le profil artisan
+- [ ] IA qui mémorise les modifications de l'artisan (préférences, formulations, habitudes)
+- [ ] Mémoire client : retrouver un client par nom ou SIRET
+- [ ] Site web public avec espace client authentifié et dashboard personnel
+
+### V3 — Vision long terme
+
+- [ ] Dashboard admin interne : ventes, suivi des bugs, suivi des clients
+- [ ] Extension multi-secteurs : onboarding guidé et bibliothèque de prestations dynamique par métier
+- [ ] Séquestre de paiement via Stripe Connect
+- [ ] Photos d'avancement de chantier (upload et suivi)
+- [ ] Portail client complet (accès historique devis/factures, messagerie, suivi chantier)
+
+---
+
+## Hébergement site web
+
+### Architecture finale de déploiement
+
+| URL | Contenu | Hébergement |
+|-----|---------|-------------|
+| `devisvoice.fr` | Site marketing + espace client authentifié | Vercel |
+| `api.devisvoice.fr` | Backend `server.js` | Railway |
+| PWA app artisan | Application artisan (actuelle) | GitHub Pages |
+
+### Vercel — Site web
+- Stack : **React + TypeScript + Tailwind CSS + shadcn**
+- Déploiement automatique depuis GitHub à chaque push sur `main`
+- Variables d'environnement Vercel pointent vers le backend Railway (`api.devisvoice.fr`)
+- Domaine cible : `devisvoice.fr`
+
+### Railway — Backend
+- Expose l'API REST sur `api.devisvoice.fr`
+- Base de données PostgreSQL hébergée sur Railway
+- Variables d'environnement : `DATABASE_URL`, `RESEND_API_KEY`, `ANTHROPIC_API_KEY`
+
+---
+
+## Extension multi-métiers
+
+L'app est actuellement **limitée au BTP** avec 13 corps de métier. L'objectif V3 est d'étendre à tous les secteurs avec des bibliothèques hardcodées complètes.
+
+### Architecture prévue
+
+- **Onboarding** : l'utilisateur choisit son secteur principal puis coche un ou plusieurs métiers
+- **Bibliothèque dynamique** : les prestations se construisent selon les métiers cochés
+- **Contexte IA** : les métiers sélectionnés sont injectés dans le prompt Claude
+- **Personnalisation** : l'artisan peut modifier les prix par défaut et ajouter ses propres prestations
+- **Hardcoding** : chaque métier a sa bibliothèque complète avec prestations, unités et prix unitaires réalistes
+
+### Secteurs à hardcoder
+
+| # | Secteur |
+|---|---------|
+| 1 | Événementiel |
+| 2 | Bien-être |
+| 3 | Auto |
+| 4 | Paysagisme |
+| 5 | Nettoyage |
+| 6 | Déménagement |
+| 7 | Informatique |
+| 8 | Restauration |
+| 9 | Photographie |
+| 10 | Coiffure |
+| 11 | Esthétique |
+| 12 | Architecture d'intérieur |
+| 13 | Sécurité |
+| 14 | Transport |
+
+### État actuel
+- BTP : 13 corps de métier — **hardcodé, opérationnel**
+- Autres secteurs : **à implémenter (V3)**
+
+---
+
+## Inspiration Design & Composants UI
+
+> Détail complet dans `inspiration/composants-ui.md`
+
+Le **site web** (distinct de l'app artisan) sera construit en **React + Tailwind CSS + TypeScript + shadcn**.
+
+### Composants clés
+| Composant | Librairie | Usage |
+|---|---|---|
+| `SplineScene` | `@splinetool/react-spline` | Scène 3D interactive — hero du site |
+| `ContainerScroll` | `framer-motion` | Mockup téléphone incliné en 3D au scroll |
+| `VoicePoweredOrb` | `ogl` (WebGL) | Orbe vocal temps réel — remplace le bouton micro |
+| `LiquidGlassButton` | `@radix-ui/react-slot` | Boutons CTA effet verre liquide |
+
+### Direction design
+- Interface **premium et moderne**
+- 3D **purposeful** : montre le produit, ne décore pas
+- Mockup iPhone 3D sur le hero
+- L'orbe vocal est l'**élément signature** de DevisVoice
+
+### npm à installer sur le site
+```
+@splinetool/runtime @splinetool/react-spline framer-motion ogl @radix-ui/react-slot class-variance-authority
+```
+
+---
+
+## Notes de déploiement
+
+- Le serveur démarre avec `node server.js` (`npm start`)
+- Le port est défini par `process.env.PORT` (défaut `8080`)
+- La connexion PostgreSQL requiert SSL (`rejectUnauthorized: false`)
+- Aucun `.env` local n'est commité — les variables sont injectées par la plateforme de déploiement

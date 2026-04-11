@@ -12,6 +12,21 @@ const pool = new Pool({
 });
 
 pool.query(`
+  CREATE TABLE IF NOT EXISTS factures (
+    id VARCHAR(50) PRIMARY KEY,
+    devis_id VARCHAR(50) REFERENCES devis(id) ON DELETE SET NULL,
+    artisan_email VARCHAR(255),
+    client_nom VARCHAR(255),
+    numero VARCHAR(50),
+    statut VARCHAR(20) DEFAULT 'non_envoyee',
+    lignes JSONB,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+  )
+`).then(() => console.log('Table factures OK'))
+  .catch(err => console.error('Erreur creation table factures:', err));
+
+pool.query(`
   CREATE TABLE IF NOT EXISTS devis (
     id VARCHAR(50) PRIMARY KEY,
     data JSONB NOT NULL,
@@ -168,6 +183,88 @@ app.post('/api/devis/accept', async (req, res) => {
   } catch (err) { res.status(500).json({error: err.message}); }
 });
 
+
+// ===== MODULE FACTURES =====
+
+// Sauvegarde / mise à jour d'une facture
+app.post('/api/factures/save', async (req, res) => {
+  const { id, devisId, artisanEmail, clientNom, numero, lignes } = req.body;
+  if (!id || !artisanEmail) return res.status(400).json({ error: 'Paramètres manquants' });
+  try {
+    await pool.query(
+      `INSERT INTO factures (id, devis_id, artisan_email, client_nom, numero, lignes, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (id) DO UPDATE
+       SET client_nom=$4, numero=$5, lignes=$6, updated_at=NOW()`,
+      [id, devisId || null, artisanEmail, clientNom || null, numero || null, JSON.stringify(lignes || [])]
+    );
+    res.json({ success: true, id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Récupération d'une facture
+app.get('/api/factures/:id', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM factures WHERE id=$1', [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Facture introuvable' });
+    res.json(result.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Mise à jour du statut (non_envoyee → envoyee → payee)
+app.patch('/api/factures/:id/statut', async (req, res) => {
+  const { statut } = req.body;
+  const statuts = ['non_envoyee', 'envoyee', 'en_attente', 'payee'];
+  if (!statuts.includes(statut)) return res.status(400).json({ error: 'Statut invalide' });
+  try {
+    const result = await pool.query(
+      'UPDATE factures SET statut=$2, updated_at=NOW() WHERE id=$1 RETURNING *',
+      [req.params.id, statut]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Facture introuvable' });
+    res.json({ success: true, statut: result.rows[0].statut });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Liste des factures d'un artisan
+app.get('/api/factures', async (req, res) => {
+  const email = req.query.email;
+  if (!email) return res.status(400).json({ error: 'Email requis' });
+  try {
+    const result = await pool.query(
+      'SELECT id, devis_id, client_nom, numero, statut, created_at FROM factures WHERE artisan_email=$1 ORDER BY created_at DESC',
+      [email]
+    );
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== RECHERCHE SIRET =====
+app.get('/api/siret/:siret', async (req, res) => {
+  const siret = req.params.siret.replace(/\s/g, '');
+  if (!/^\d{14}$/.test(siret)) {
+    return res.status(400).json({ error: 'SIRET invalide — 14 chiffres requis' });
+  }
+  try {
+    const response = await fetch(`https://recherche-entreprises.api.gouv.fr/search?q=${siret}&page=1&per_page=1`);
+    if (!response.ok) throw new Error('Erreur API service public');
+    const data = await response.json();
+    if (!data.results || data.results.length === 0) {
+      return res.status(404).json({ error: 'Entreprise introuvable' });
+    }
+    const e = data.results[0];
+    const siege = e.siege || {};
+    res.json({
+      siret: siege.siret || siret,
+      siren: e.siren || '',
+      nom: e.nom_raison_sociale || e.nom_complet || '',
+      adresse: siege.adresse || '',
+      code_postal: siege.code_postal || '',
+      ville: siege.libelle_commune || '',
+      activite: siege.activite_principale || ''
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 // ===== STATS TABLEAU DE BORD =====
 app.get('/api/stats', async (req, res) => {
