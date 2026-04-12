@@ -400,6 +400,54 @@ Flux en 4 étapes linéaires, une étape par écran :
 
 ---
 
+## Sécurité
+
+### Ce qui est déjà en place
+
+- HTTPS partout — GitHub Pages, Railway, Vercel
+- Variables d'environnement sur Railway — clés API jamais dans le code
+- Requêtes SQL paramétrées — pas d'injection SQL possible
+- PostgreSQL avec SSL activé
+
+### Authentification
+
+- JWT avec expiration courte + refresh tokens sécurisés
+- OAuth Google / Apple / Facebook via NextAuth.js — aucun mot de passe stocké côté DevisVoice
+- Sessions invalidées côté serveur à la déconnexion
+
+### Isolation des Données
+
+- Chaque artisan ne voit que ses propres données — filtrage strict par `user_id` sur **toutes** les routes API
+- Chiffrement des données sensibles en base : IBAN, SIRET
+- Aucune donnée client exposée dans les URLs
+
+### Protection de l'API
+
+- Rate limiting sur toutes les routes — bloquer force brute et spam
+- CORS configuré strictement — uniquement les domaines autorisés
+- Validation et sanitisation de toutes les entrées utilisateur
+- Headers de sécurité HTTP via `helmet.js`
+
+### Paiements
+
+- Stripe gère tout le chiffrement CB — jamais de numéro de carte stocké chez DevisVoice
+- Conformité PCI DSS assurée automatiquement par Stripe
+- Stripe Connect avec vérification d'identité artisan (KYC obligatoire)
+
+### RGPD
+
+- Politique de confidentialité obligatoire pour App Store et Google Play
+- Consentement cookies sur le site Vercel
+- Droit à l'effacement des données implémenté (suppression compte + données associées)
+- Données hébergées en Europe — Railway région Europe
+
+### Règle Absolue
+
+> Ne **jamais** exposer dans le code, les logs ou les réponses API :
+> `DATABASE_URL` · `RESEND_API_KEY` · `ANTHROPIC_API_KEY` · `STRIPE_SECRET_KEY` · `STRIPE_WEBHOOK_SECRET` · `SUPABASE_SERVICE_KEY`
+
+---
+
 ## Inspiration Design & Composants UI
 
 > Détail complet dans `inspiration/composants-ui.md`
