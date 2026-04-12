@@ -299,6 +299,68 @@ L'app est actuellement **limitée au BTP** avec 13 corps de métier. L'objectif 
 
 ---
 
+## Publication App & Paiements
+
+### Publication App Store & Google Play
+
+| Élément | Choix |
+|---------|-------|
+| Outil de packaging | **Capacitor** (pas PWABuilder) |
+| iOS | App Store via Xcode |
+| Android | Google Play via Android Studio |
+
+Capacitor transforme la PWA existante en app native iOS et Android sans réécrire le code. Le micro et Web Audio API fonctionnent nativement via Capacitor.
+
+**Fonctionnalités natives à activer via Capacitor :**
+- Microphone — déjà fonctionnel dans la PWA, natif via plugin Capacitor
+- Notifications push — V2
+- Caméra pour photos chantier — V3
+
+---
+
+### Authentification
+
+- **Provider** : NextAuth.js avec OAuth
+- **Méthodes** : connexion Google, Apple, Facebook
+- **Emplacement** : pages inscription et login à créer sur le site Vercel (`devisvoice.fr`)
+
+---
+
+### Paiement — Abonnements Artisans
+
+Provider : **Stripe Subscriptions**
+
+| Plan | Prix mensuel |
+|------|-------------|
+| Solo | 29 € / mois |
+| Équipe | 49 € / mois |
+| Pro | 79 € / mois |
+
+Stripe gère automatiquement : renouvellements, annulations, relances en cas d'échec de paiement.
+
+---
+
+### Paiement — Client Final via l'App
+
+- **Provider** : **Stripe Connect**
+- Le client de l'artisan paie sa facture directement par CB dans l'app
+- L'argent va directement sur le compte bancaire de l'artisan (Stripe Connect Express)
+- DevisVoice ne touche jamais les fonds — modèle marketplace transparent
+
+---
+
+### Commission DevisVoice sur les Paiements Clients
+
+| Phase | Seuil | Commission DevisVoice | Frais Stripe seuls |
+|-------|-------|-----------------------|--------------------|
+| **Phase 1** — Lancement | 0 à 300 abonnés | **0%** | 1,4% + 0,25 € (carte européenne) |
+| **Phase 2** — Croissance | 300 abonnés et plus | **0,5% par transaction** | 1,4% + 0,25 € |
+
+> **Argument commercial fort (Phase 1)** : zéro commission DevisVoice sur les paiements clients. L'artisan ne paie que les frais Stripe standard.
+> Le passage en Phase 2 se fait avec un **préavis de 30 jours** notifié à tous les utilisateurs actifs.
+
+---
+
 ## Inspiration Design & Composants UI
 
 > Détail complet dans `inspiration/composants-ui.md`
