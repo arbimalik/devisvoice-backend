@@ -45,6 +45,16 @@ ANTHROPIC_API_KEY  — Clé API Anthropic / Claude
 PORT               — Port d'écoute (défaut : 8080)
 ```
 
+### Variables d'environnement à venir (V2/V3)
+```
+STRIPE_SECRET_KEY      — Clé secrète Stripe (paiements, séquestre via Stripe Connect)
+STRIPE_WEBHOOK_SECRET  — Secret webhook Stripe pour valider les événements entrants
+SUPABASE_URL           — URL du projet Supabase (si migration vers Supabase)
+SUPABASE_SERVICE_KEY   — Clé service Supabase (accès admin, côté backend uniquement)
+```
+
+> Ces clés ne sont pas encore utilisées dans le code. Les ajouter aux variables Railway et au `.env` local dès qu'elles sont disponibles.
+
 ---
 
 ## Architecture du projet
@@ -216,7 +226,7 @@ sendEmail({ artisanNom, artisanEmail, to, subject, html })
 - [ ] Suivi des factures : statut payée ou en attente
 - [ ] Champ email comptable dans le profil artisan
 - [ ] IA qui mémorise les modifications de l'artisan (préférences, formulations, habitudes)
-- [ ] Mémoire client : retrouver un client par nom ou SIRET
+- [ ] Mémoire client : retrouver un client par nom ou SIRET (approche décidée : table `clients` PostgreSQL liée à `artisan_email`, routes `POST /api/clients/save` + `GET /api/clients/search?email=&q=`, autocomplétion frontend sur nom et SIRET dès les premiers caractères)
 - [ ] Site web public avec espace client authentifié et dashboard personnel
 
 ### V3 — Vision long terme
