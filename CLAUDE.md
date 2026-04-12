@@ -361,6 +361,45 @@ Stripe gère automatiquement : renouvellements, annulations, relances en cas d'�
 
 ---
 
+## Pages d'Authentification
+
+### Page d'Accueil / Login (site Vercel + app Capacitor)
+
+Première page que voit l'artisan au lancement de l'app et sur le site.
+
+**Design :**
+- Logo DevisVoice centré
+- Fond sombre, thème Nuit/Orange par défaut
+- Épuré — aucun élément superflu
+
+**Connexion sociale (prioritaire) :**
+- Continuer avec Google
+- Continuer avec Apple
+- Continuer avec Facebook
+
+**Email / mot de passe** — option secondaire, en bas de page
+
+**Redirections après connexion :**
+- Nouveau compte → onboarding (choix secteur + métiers)
+- Compte existant → dashboard directement
+
+---
+
+### Onboarding Nouvel Artisan (après première connexion)
+
+Flux en 4 étapes linéaires, une étape par écran :
+
+| Étape | Contenu |
+|-------|---------|
+| **1 — Secteur** | Choix du secteur principal (BTP, Événementiel, Bien-être, Auto, etc.) |
+| **2 — Métiers** | Multi-sélection des métiers dans ce secteur |
+| **3 — Profil** | Nom entreprise, SIRET, téléphone, logo |
+| **4 — Abonnement** | Choix du plan Solo / Équipe / Pro + paiement Stripe |
+
+**Après onboarding :** accès direct à l'app avec la bibliothèque de prestations prête selon les métiers choisis. Aucune configuration supplémentaire requise.
+
+---
+
 ## Inspiration Design & Composants UI
 
 > Détail complet dans `inspiration/composants-ui.md`
