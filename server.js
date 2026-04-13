@@ -135,6 +135,37 @@ app.post('/api/send-devis', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ===== ENVOI FIN DE CHANTIER (facture → client + comptable) =====
+app.post('/api/send-fin-chantier', async (req, res) => {
+  const { artisanNom, artisanEmail, clientEmail, comptableEmail, clientNom, numero, montant, html } = req.body;
+  if (!artisanEmail) return res.status(400).json({ error: 'artisanEmail requis' });
+  try {
+    const subject = `Facture ${numero} — ${clientNom || 'Chantier terminé'}`;
+
+    // Email au client
+    if (clientEmail) {
+      await sendEmail({ artisanNom, artisanEmail, to: clientEmail, subject, html });
+    }
+
+    // Copie au comptable
+    if (comptableEmail) {
+      const subjectComptable = `[Copie comptable] Facture ${numero} — ${clientNom}`;
+      await sendEmail({ artisanNom, artisanEmail, to: comptableEmail, subject: subjectComptable, html });
+    }
+
+    // Mise à jour statut facture en BDD
+    if (numero) {
+      const factureId = 'F-' + numero.replace(/^F-/, '');
+      await pool.query(
+        "UPDATE factures SET statut='envoyee', updated_at=NOW() WHERE numero=$1 AND artisan_email=$2",
+        [numero, artisanEmail]
+      ).catch(() => {});
+    }
+
+    res.json({ success: true, clientEnvoye: !!clientEmail, comptableEnvoye: !!comptableEmail });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ===== ENVOI EMAIL ACCEPTATION =====
 app.post('/api/send-acceptation', async (req, res) => {
   const { artisanNom, artisanEmail, clientEmail, clientNom, numero, montant, sigB64, today } = req.body;
@@ -309,11 +340,13 @@ app.post('/api/devis/fusion', async (req, res) => {
     // Si chantier terminé : créer la facture automatiquement
     let factureId = null;
     if (chantierTermine) {
-      factureId = 'FAC-' + Date.now();
+      factureId = 'F-' + newId;
+      const numeroFacture = factureId + '-' + new Date().getFullYear();
       await pool.query(
         `INSERT INTO factures (id, devis_id, artisan_email, client_nom, numero, lignes, statut)
-         VALUES ($1, $2, $3, $4, $5, $6, 'non_envoyee')`,
-        [factureId, newId, artisanEmail, firstData?.client?.nom || '', factureId, JSON.stringify(allLignes)]
+         VALUES ($1, $2, $3, $4, $5, $6, 'non_envoyee')
+         ON CONFLICT (id) DO NOTHING`,
+        [factureId, newId, artisanEmail, firstData?.client?.nom || '', numeroFacture, JSON.stringify(allLignes)]
       );
     }
 
