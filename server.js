@@ -106,7 +106,12 @@ async function sendEmail({ artisanNom, artisanEmail, to, subject, html, attachme
     subject,
     html
   };
-  if (attachments && attachments.length) payload.attachments = attachments;
+  if (attachments && attachments.length) {
+    payload.attachments = attachments.map(a => ({
+      ...a,
+      content_type: a.content_type || 'application/octet-stream'
+    }));
+  }
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -139,9 +144,9 @@ app.post('/api/claude', async (req, res) => {
 
 // ===== ENVOI DEVIS PAR EMAIL =====
 app.post('/api/send-devis', async (req, res) => {
-  const { artisanNom, artisanEmail, clientEmail, subject, html } = req.body;
+  const { artisanNom, artisanEmail, clientEmail, subject, html, attachments } = req.body;
   try {
-    const data = await sendEmail({ artisanNom, artisanEmail, to: clientEmail, subject, html });
+    const data = await sendEmail({ artisanNom, artisanEmail, to: clientEmail, subject, html, attachments });
     res.json({ success: true, data });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
