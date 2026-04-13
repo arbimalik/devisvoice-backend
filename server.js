@@ -173,14 +173,23 @@ app.post('/api/send-acceptation', async (req, res) => {
 
 // ===== SAUVEGARDE DEVIS =====
 app.post('/api/devis/save', async (req, res) => {
-  const { id, data, artisanEmail, artisanNom, clientEmail, libelle } = req.body;
+  const { id, data, artisanEmail, artisanNom, clientEmail, libelle, _libelleOnly } = req.body;
+  if (!id || !artisanEmail) return res.status(400).json({ error: 'Paramètres manquants' });
   try {
-    await pool.query(
-      `INSERT INTO devis (id, data, artisan_email, artisan_nom, client_email, libelle)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (id) DO UPDATE SET data=$2, artisan_nom=$4, libelle=$6`,
-      [id, JSON.stringify(data), artisanEmail, artisanNom, clientEmail, libelle || null]
-    );
+    if (_libelleOnly) {
+      // Mise à jour du libellé uniquement, sans toucher aux données du devis
+      await pool.query(
+        'UPDATE devis SET libelle=$2 WHERE id=$1 AND artisan_email=$3',
+        [id, libelle || null, artisanEmail]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO devis (id, data, artisan_email, artisan_nom, client_email, libelle)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (id) DO UPDATE SET data=$2, artisan_nom=$4, libelle=COALESCE($6, devis.libelle)`,
+        [id, JSON.stringify(data), artisanEmail, artisanNom, clientEmail, libelle || null]
+      );
+    }
     res.json({ success: true, id });
   } catch (err) { res.status(500).json({error: err.message}); }
 });
