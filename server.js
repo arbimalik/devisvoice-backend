@@ -45,7 +45,12 @@ pool.query(`
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
   )
-`).then(() => console.log('Table factures OK'))
+`).then(() =>
+  pool.query(`
+    ALTER TABLE factures
+    ADD COLUMN IF NOT EXISTS libelle TEXT
+  `)
+).then(() => console.log('Table factures OK'))
   .catch(err => console.error('Erreur creation table factures:', err));
 
 pool.query(`
@@ -70,7 +75,14 @@ pool.query(`
     ADD COLUMN IF NOT EXISTS signature TEXT,
     ADD COLUMN IF NOT EXISTS artisan_nom VARCHAR(255)
   `);
-}).then(() => console.log('Table devis OK'))
+}).then(() =>
+  pool.query(`
+    ALTER TABLE devis
+    ADD COLUMN IF NOT EXISTS libelle TEXT,
+    ADD COLUMN IF NOT EXISTS statut VARCHAR(20) DEFAULT 'actif',
+    ADD COLUMN IF NOT EXISTS fusion_id VARCHAR(50)
+  `)
+).then(() => console.log('Table devis OK'))
   .catch(err => console.error('Erreur creation table:', err));
 
 // ===== HELPER ENVOI EMAIL CENTRALISÉ =====
@@ -161,11 +173,13 @@ app.post('/api/send-acceptation', async (req, res) => {
 
 // ===== SAUVEGARDE DEVIS =====
 app.post('/api/devis/save', async (req, res) => {
-  const { id, data, artisanEmail, artisanNom, clientEmail } = req.body;
+  const { id, data, artisanEmail, artisanNom, clientEmail, libelle } = req.body;
   try {
     await pool.query(
-      'INSERT INTO devis (id, data, artisan_email, artisan_nom, client_email) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO UPDATE SET data=$2, artisan_nom=$4',
-      [id, JSON.stringify(data), artisanEmail, artisanNom, clientEmail]
+      `INSERT INTO devis (id, data, artisan_email, artisan_nom, client_email, libelle)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO UPDATE SET data=$2, artisan_nom=$4, libelle=$6`,
+      [id, JSON.stringify(data), artisanEmail, artisanNom, clientEmail, libelle || null]
     );
     res.json({ success: true, id });
   } catch (err) { res.status(500).json({error: err.message}); }
@@ -178,6 +192,23 @@ app.get('/api/devis/:id', async (req, res) => {
     if(result.rows.length === 0) return res.status(404).json({error: 'Devis introuvable'});
     res.json(result.rows[0]);
   } catch (err) { res.status(500).json({error: err.message}); }
+});
+
+// ===== HISTORIQUE DEVIS =====
+app.get('/api/devis', async (req, res) => {
+  const email = req.query.email;
+  if (!email) return res.status(400).json({ error: 'Email requis' });
+  try {
+    const result = await pool.query(
+      `SELECT id, data->>'total_ttc' as montant, data->'client'->>'nom' as client,
+              accepted, statut, fusion_id, libelle, created_at
+       FROM devis
+       WHERE artisan_email=$1
+       ORDER BY created_at DESC`,
+      [email]
+    );
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ===== ACCEPTATION DEVIS =====
@@ -206,19 +237,92 @@ app.post('/api/devis/accept', async (req, res) => {
 });
 
 
+// ===== FUSION DE DEVIS =====
+// Fusionne plusieurs devis acceptés en un seul nouveau devis (irréversible)
+// Si chantier_termine=true, crée aussi la facture et envoie les deux par email
+app.post('/api/devis/fusion', async (req, res) => {
+  const { ids, artisanEmail, artisanNom, chantierTermine } = req.body;
+  if (!ids || !Array.isArray(ids) || ids.length < 2) {
+    return res.status(400).json({ error: 'Au moins 2 devis requis pour une fusion' });
+  }
+  if (!artisanEmail) return res.status(400).json({ error: 'artisanEmail requis' });
+
+  try {
+    // Récupérer tous les devis à fusionner
+    const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ');
+    const devisResult = await pool.query(
+      `SELECT * FROM devis WHERE id IN (${placeholders}) AND artisan_email=$${ids.length + 1} AND accepted=TRUE AND statut='actif'`,
+      [...ids, artisanEmail]
+    );
+
+    if (devisResult.rows.length !== ids.length) {
+      return res.status(400).json({ error: 'Certains devis sont introuvables, non acceptés ou déjà fusionnés' });
+    }
+
+    // Fusionner toutes les lignes et recalculer les totaux
+    const allLignes = [];
+    let totalHT = 0;
+    let totalTTC = 0;
+    const clientEmail = devisResult.rows[0].client_email;
+    const firstData = devisResult.rows[0].data;
+
+    for (const d of devisResult.rows) {
+      const lignes = d.data.lignes || [];
+      allLignes.push(...lignes);
+      totalHT += parseFloat(d.data.total_ht || 0);
+      totalTTC += parseFloat(d.data.total_ttc || 0);
+    }
+
+    // Créer le nouveau devis fusionné
+    const newId = 'DV-FUSION-' + Date.now();
+    const newData = {
+      ...firstData,
+      lignes: allLignes,
+      total_ht: totalHT.toFixed(2),
+      total_ttc: totalTTC.toFixed(2),
+      fusion_sources: ids
+    };
+
+    await pool.query(
+      `INSERT INTO devis (id, data, artisan_email, artisan_nom, client_email, accepted, accepted_by, accepted_at, statut)
+       VALUES ($1, $2, $3, $4, $5, TRUE, $6, NOW(), 'actif')`,
+      [newId, JSON.stringify(newData), artisanEmail, artisanNom || null, clientEmail, firstData?.client?.nom || 'Fusion']
+    );
+
+    // Marquer les anciens devis comme fusionnés
+    await pool.query(
+      `UPDATE devis SET statut='fusionné', fusion_id=$1 WHERE id IN (${placeholders})`,
+      [newId, ...ids]
+    );
+
+    // Si chantier terminé : créer la facture automatiquement
+    let factureId = null;
+    if (chantierTermine) {
+      factureId = 'FAC-' + Date.now();
+      await pool.query(
+        `INSERT INTO factures (id, devis_id, artisan_email, client_nom, numero, lignes, statut)
+         VALUES ($1, $2, $3, $4, $5, $6, 'non_envoyee')`,
+        [factureId, newId, artisanEmail, firstData?.client?.nom || '', factureId, JSON.stringify(allLignes)]
+      );
+    }
+
+    res.json({ success: true, newDevisId: newId, factureId });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ===== MODULE FACTURES =====
 
 // Sauvegarde / mise à jour d'une facture
 app.post('/api/factures/save', async (req, res) => {
-  const { id, devisId, artisanEmail, clientNom, numero, lignes } = req.body;
+  const { id, devisId, artisanEmail, clientNom, numero, lignes, libelle } = req.body;
   if (!id || !artisanEmail) return res.status(400).json({ error: 'Paramètres manquants' });
   try {
     await pool.query(
-      `INSERT INTO factures (id, devis_id, artisan_email, client_nom, numero, lignes, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      `INSERT INTO factures (id, devis_id, artisan_email, client_nom, numero, lignes, libelle, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
        ON CONFLICT (id) DO UPDATE
-       SET client_nom=$4, numero=$5, lignes=$6, updated_at=NOW()`,
-      [id, devisId || null, artisanEmail, clientNom || null, numero || null, JSON.stringify(lignes || [])]
+       SET client_nom=$4, numero=$5, lignes=$6, libelle=$7, updated_at=NOW()`,
+      [id, devisId || null, artisanEmail, clientNom || null, numero || null, JSON.stringify(lignes || []), libelle || null]
     );
     res.json({ success: true, id });
   } catch (err) { res.status(500).json({ error: err.message }); }
