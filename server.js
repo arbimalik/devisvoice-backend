@@ -151,7 +151,7 @@ app.post('/api/send-fin-chantier', async (req, res) => {
   const { artisanNom, artisanEmail, clientEmail, comptableEmail, clientNom, numero, montant, html, pdfBase64 } = req.body;
   if (!artisanEmail) return res.status(400).json({ error: 'artisanEmail requis' });
   try {
-    const subject = `Facture ${numero} — ${clientNom || 'Chantier terminé'}`;
+    const subject = `Facture ${numero} - ${artisanNom}`;
     const attachments = pdfBase64
       ? [{ filename: `${numero}.pdf`, content: pdfBase64 }]
       : [];
