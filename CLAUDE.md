@@ -161,6 +161,17 @@ Marque un devis comme accepté. Idempotent protégé : retourne `409` si déjà 
 { "id": "", "acceptedBy": "", "acceptedAt": "", "signature": "" }
 ```
 
+### `POST /api/clients/save`
+Sauvegarde ou met à jour un client (upsert sur `artisan_email + nom`).
+```json
+{ "artisanEmail": "", "nom": "", "email": "", "telephone": "", "siret": "", "adresse": "", "ville": "", "codePostal": "" }
+```
+
+### `GET /api/clients?email=xxx&q=yyy`
+Retourne les clients d'un artisan.
+- Sans `q` : tous les clients triés par nom (pour le menu déroulant au chargement)
+- Avec `q` : filtre sur nom, email, téléphone, adresse, ville, code postal, SIRET (max 10 résultats)
+
 ### `GET /api/stats?email=xxx`
 Statistiques mensuelles pour le tableau de bord artisan.
 ```json
@@ -226,7 +237,7 @@ sendEmail({ artisanNom, artisanEmail, to, subject, html })
 - [ ] Suivi des factures : statut payée ou en attente
 - [ ] Champ email comptable dans le profil artisan
 - [ ] IA qui mémorise les modifications de l'artisan (préférences, formulations, habitudes)
-- [ ] Mémoire client : retrouver un client par nom ou SIRET (approche décidée : table `clients` PostgreSQL liée à `artisan_email`, routes `POST /api/clients/save` + `GET /api/clients/search?email=&q=`, autocomplétion frontend sur nom et SIRET dès les premiers caractères)
+- [x] Mémoire client : table `clients` PostgreSQL liée à `artisan_email`, routes `POST /api/clients/save` + `GET /api/clients?email=&q=`, recherche multi-champs (nom, email, téléphone, adresse, ville, code postal, SIRET), autocomplétion + menu déroulant frontend
 - [ ] Site web public avec espace client authentifié et dashboard personnel
 
 ### V3 — Vision long terme

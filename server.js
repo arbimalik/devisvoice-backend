@@ -12,6 +12,28 @@ const pool = new Pool({
 });
 
 pool.query(`
+  CREATE TABLE IF NOT EXISTS clients (
+    id            SERIAL PRIMARY KEY,
+    artisan_email VARCHAR(255) NOT NULL,
+    nom           VARCHAR(255),
+    email         VARCHAR(255),
+    telephone     VARCHAR(50),
+    siret         VARCHAR(14),
+    adresse       TEXT,
+    ville         VARCHAR(100),
+    code_postal   VARCHAR(10),
+    created_at    TIMESTAMP DEFAULT NOW(),
+    updated_at    TIMESTAMP DEFAULT NOW()
+  )
+`).then(() =>
+  pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS clients_artisan_nom_idx
+    ON clients (artisan_email, nom)
+  `)
+).then(() => console.log('Table clients OK'))
+  .catch(err => console.error('Erreur creation table clients:', err));
+
+pool.query(`
   CREATE TABLE IF NOT EXISTS factures (
     id VARCHAR(50) PRIMARY KEY,
     devis_id VARCHAR(50) REFERENCES devis(id) ON DELETE SET NULL,
@@ -235,6 +257,62 @@ app.get('/api/factures', async (req, res) => {
       'SELECT id, devis_id, client_nom, numero, statut, created_at FROM factures WHERE artisan_email=$1 ORDER BY created_at DESC',
       [email]
     );
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== MODULE CLIENTS =====
+
+// Sauvegarde / mise à jour d'un client (upsert sur artisan_email + siret, ou artisan_email + nom si pas de SIRET)
+app.post('/api/clients/save', async (req, res) => {
+  const { artisanEmail, nom, email, telephone, siret, adresse, ville, codePostal } = req.body;
+  if (!artisanEmail || !nom) return res.status(400).json({ error: 'artisanEmail et nom requis' });
+  try {
+    await pool.query(
+      `INSERT INTO clients (artisan_email, nom, email, telephone, siret, adresse, ville, code_postal, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+       ON CONFLICT (artisan_email, nom) DO UPDATE
+       SET email=$3, telephone=$4, siret=$5, adresse=$6, ville=$7, code_postal=$8, updated_at=NOW()`,
+      [artisanEmail, nom, email || null, telephone || null, siret || null, adresse || null, ville || null, codePostal || null]
+    );
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Liste tous les clients d'un artisan (pour menu déroulant)
+// Si q est fourni : filtre par nom ou SIRET (autocomplétion)
+// Si q est absent  : retourne tous les clients triés par nom
+app.get('/api/clients', async (req, res) => {
+  const { email, q } = req.query;
+  if (!email) return res.status(400).json({ error: 'email requis' });
+  try {
+    let result;
+    if (q && q.trim()) {
+      result = await pool.query(
+        `SELECT id, nom, email, telephone, siret, adresse, ville, code_postal
+         FROM clients
+         WHERE artisan_email=$1 AND (
+           nom       ILIKE $2 OR
+           email     ILIKE $2 OR
+           telephone LIKE  $3 OR
+           siret     LIKE  $3 OR
+           adresse   ILIKE $2 OR
+           ville     ILIKE $2 OR
+           code_postal LIKE $3
+         )
+         ORDER BY nom ASC
+         LIMIT 10`,
+        [email, `%${q.trim()}%`, `${q.trim()}%`]
+      );
+    } else {
+      result = await pool.query(
+        `SELECT id, nom, email, telephone, siret, adresse, ville, code_postal
+         FROM clients
+         WHERE artisan_email=$1
+         ORDER BY nom ASC`,
+        [email]
+      );
+    }
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
