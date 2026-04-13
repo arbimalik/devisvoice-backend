@@ -323,16 +323,23 @@ app.post('/api/devis/fusion', async (req, res) => {
 
 // Sauvegarde / mise à jour d'une facture
 app.post('/api/factures/save', async (req, res) => {
-  const { id, devisId, artisanEmail, clientNom, numero, lignes, libelle } = req.body;
+  const { id, devisId, artisanEmail, clientNom, numero, lignes, libelle, _libelleOnly } = req.body;
   if (!id || !artisanEmail) return res.status(400).json({ error: 'Paramètres manquants' });
   try {
-    await pool.query(
-      `INSERT INTO factures (id, devis_id, artisan_email, client_nom, numero, lignes, libelle, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-       ON CONFLICT (id) DO UPDATE
-       SET client_nom=$4, numero=$5, lignes=$6, libelle=$7, updated_at=NOW()`,
-      [id, devisId || null, artisanEmail, clientNom || null, numero || null, JSON.stringify(lignes || []), libelle || null]
-    );
+    if (_libelleOnly) {
+      await pool.query(
+        'UPDATE factures SET libelle=$2, updated_at=NOW() WHERE id=$1 AND artisan_email=$3',
+        [id, libelle || null, artisanEmail]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO factures (id, devis_id, artisan_email, client_nom, numero, lignes, libelle, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+         ON CONFLICT (id) DO UPDATE
+         SET client_nom=$4, numero=$5, lignes=$6, libelle=COALESCE($7, factures.libelle), updated_at=NOW()`,
+        [id, devisId || null, artisanEmail, clientNom || null, numero || null, JSON.stringify(lignes || []), libelle || null]
+      );
+    }
     res.json({ success: true, id });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -367,7 +374,7 @@ app.get('/api/factures', async (req, res) => {
   if (!email) return res.status(400).json({ error: 'Email requis' });
   try {
     const result = await pool.query(
-      'SELECT id, devis_id, client_nom, numero, statut, created_at FROM factures WHERE artisan_email=$1 ORDER BY created_at DESC',
+      'SELECT id, devis_id, client_nom, numero, statut, libelle, created_at FROM factures WHERE artisan_email=$1 ORDER BY created_at DESC',
       [email]
     );
     res.json(result.rows);
