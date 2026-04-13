@@ -97,21 +97,23 @@ pool.query(`
 // ===== HELPER ENVOI EMAIL CENTRALISÉ =====
 // Tous les emails partent depuis devis@devisvoice.fr
 // L'artisan apparaît comme expéditeur via le "from name"
-async function sendEmail({ artisanNom, artisanEmail, to, subject, html }) {
+async function sendEmail({ artisanNom, artisanEmail, to, subject, html, attachments }) {
   const fromName = artisanNom ? `${artisanNom} via DevisVoice` : 'DevisVoice';
+  const payload = {
+    from: `${fromName} <devis@devisvoice.fr>`,
+    reply_to: artisanEmail || 'contact@devisvoice.fr',
+    to: Array.isArray(to) ? to : [to],
+    subject,
+    html
+  };
+  if (attachments && attachments.length) payload.attachments = attachments;
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + process.env.RESEND_API_KEY,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({
-      from: `${fromName} <devis@devisvoice.fr>`,
-      reply_to: artisanEmail || 'contact@devisvoice.fr',
-      to: Array.isArray(to) ? to : [to],
-      subject,
-      html
-    })
+    body: JSON.stringify(payload)
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.message || 'Erreur envoi email');
@@ -146,20 +148,23 @@ app.post('/api/send-devis', async (req, res) => {
 
 // ===== ENVOI FIN DE CHANTIER (facture → client + comptable) =====
 app.post('/api/send-fin-chantier', async (req, res) => {
-  const { artisanNom, artisanEmail, clientEmail, comptableEmail, clientNom, numero, montant, html } = req.body;
+  const { artisanNom, artisanEmail, clientEmail, comptableEmail, clientNom, numero, montant, html, pdfBase64 } = req.body;
   if (!artisanEmail) return res.status(400).json({ error: 'artisanEmail requis' });
   try {
     const subject = `Facture ${numero} — ${clientNom || 'Chantier terminé'}`;
+    const attachments = pdfBase64
+      ? [{ filename: `${numero}.pdf`, content: pdfBase64 }]
+      : [];
 
     // Email au client
     if (clientEmail) {
-      await sendEmail({ artisanNom, artisanEmail, to: clientEmail, subject, html });
+      await sendEmail({ artisanNom, artisanEmail, to: clientEmail, subject, html, attachments });
     }
 
     // Copie au comptable
     if (comptableEmail) {
       const subjectComptable = `[Copie comptable] Facture ${numero} — ${clientNom}`;
-      await sendEmail({ artisanNom, artisanEmail, to: comptableEmail, subject: subjectComptable, html });
+      await sendEmail({ artisanNom, artisanEmail, to: comptableEmail, subject: subjectComptable, html, attachments });
     }
 
     // Mise à jour statut facture en BDD
