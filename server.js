@@ -299,8 +299,10 @@ app.post('/api/devis/fusion', async (req, res) => {
     );
 
     // Marquer les anciens devis comme fusionnés
+    // Les IDs commencent à $2 car $1 est réservé à newId
+    const updatePlaceholders = ids.map((_, i) => `$${i + 2}`).join(', ');
     await pool.query(
-      `UPDATE devis SET statut='fusionné', fusion_id=$1 WHERE id IN (${placeholders})`,
+      `UPDATE devis SET statut='fusionné', fusion_id=$1 WHERE id IN (${updatePlaceholders})`,
       [newId, ...ids]
     );
 
@@ -469,32 +471,103 @@ app.get('/api/stats', async (req, res) => {
   const email = req.query.email;
   if(!email) return res.status(400).json({error: 'Email requis'});
   try {
-    const debut = new Date();
-    debut.setDate(1); debut.setHours(0,0,0,0);
+    // Bornes mois actuel
+    const debutMois = new Date();
+    debutMois.setDate(1); debutMois.setHours(0,0,0,0);
 
-    // Total devis ce mois
-    const totalMois = await pool.query(
-      "SELECT COUNT(*) as count FROM devis WHERE artisan_email=$1 AND created_at >= $2",
-      [email, debut]
-    );
+    // Bornes mois précédent
+    const debutPrecedent = new Date(debutMois);
+    debutPrecedent.setMonth(debutPrecedent.getMonth() - 1);
+    const finPrecedent = new Date(debutMois);
 
-    // Devis acceptés ce mois
-    const acceptesMois = await pool.query(
-      "SELECT COUNT(*) as count, SUM((data->>'total_ttc')::numeric) as montant FROM devis WHERE artisan_email=$1 AND accepted=TRUE AND accepted_at >= $2",
-      [email, debut]
-    );
+    // Bornes de l'année en cours (jan → mois actuel)
+    const debutAnnee = new Date(debutMois.getFullYear(), 0, 1);
 
-    // 5 derniers devis
-    const derniers = await pool.query(
-      "SELECT id, data->>'total_ttc' as montant, data->'client'->>'nom' as client, accepted, created_at FROM devis WHERE artisan_email=$1 ORDER BY created_at DESC LIMIT 5",
-      [email]
-    );
+    const [totalMois, acceptesMois, totalPrecedent, acceptesPrecedent, facturesAttente, derniers, parMois] = await Promise.all([
+      // Devis créés ce mois
+      pool.query(
+        "SELECT COUNT(*) as count FROM devis WHERE artisan_email=$1 AND created_at >= $2 AND statut != 'fusionné'",
+        [email, debutMois]
+      ),
+      // Devis acceptés ce mois + montant
+      pool.query(
+        "SELECT COUNT(*) as count, COALESCE(SUM((data->>'total_ttc')::numeric), 0) as montant FROM devis WHERE artisan_email=$1 AND accepted=TRUE AND accepted_at >= $2",
+        [email, debutMois]
+      ),
+      // Devis créés le mois précédent
+      pool.query(
+        "SELECT COUNT(*) as count FROM devis WHERE artisan_email=$1 AND created_at >= $2 AND created_at < $3 AND statut != 'fusionné'",
+        [email, debutPrecedent, finPrecedent]
+      ),
+      // Devis acceptés le mois précédent + montant
+      pool.query(
+        "SELECT COUNT(*) as count, COALESCE(SUM((data->>'total_ttc')::numeric), 0) as montant FROM devis WHERE artisan_email=$1 AND accepted=TRUE AND accepted_at >= $2 AND accepted_at < $3",
+        [email, debutPrecedent, finPrecedent]
+      ),
+      // Factures en attente (non payées) — montant depuis les devis liés
+      pool.query(
+        `SELECT COUNT(*) as count, COALESCE(SUM((d.data->>'total_ttc')::numeric), 0) as montant
+         FROM factures f
+         JOIN devis d ON f.devis_id = d.id
+         WHERE f.artisan_email=$1 AND f.statut != 'payee'`,
+        [email]
+      ),
+      // 5 derniers devis
+      pool.query(
+        "SELECT id, data->>'total_ttc' as montant, data->'client'->>'nom' as client, accepted, created_at FROM devis WHERE artisan_email=$1 ORDER BY created_at DESC LIMIT 5",
+        [email]
+      ),
+      // Données mois par mois depuis janvier
+      pool.query(
+        `SELECT
+           EXTRACT(MONTH FROM created_at)::int AS mois,
+           COUNT(*) AS total,
+           COUNT(*) FILTER (WHERE accepted = TRUE) AS acceptes,
+           COALESCE(SUM((data->>'total_ttc')::numeric) FILTER (WHERE accepted = TRUE), 0) AS montant
+         FROM devis
+         WHERE artisan_email=$1
+           AND created_at >= $2
+           AND statut != 'fusionné'
+         GROUP BY mois
+         ORDER BY mois`,
+        [email, debutAnnee]
+      )
+    ]);
+
+    const total     = parseInt(totalMois.rows[0].count);
+    const acceptes  = parseInt(acceptesMois.rows[0].count);
+    const montant   = parseFloat(acceptesMois.rows[0].montant) || 0;
+    const totalPrec = parseInt(totalPrecedent.rows[0].count);
+    const acceptesPrec = parseInt(acceptesPrecedent.rows[0].count);
+    const montantPrec  = parseFloat(acceptesPrecedent.rows[0].montant) || 0;
+
+    // Construire tableau des 12 mois (jan=1 → dec=12), valeur 0 si absent
+    const moisLabels = ['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
+    const parMoisMap = {};
+    parMois.rows.forEach(r => { parMoisMap[r.mois] = r; });
+    const historique = moisLabels.map((label, i) => {
+      const m = parMoisMap[i + 1];
+      return {
+        mois: label,
+        total:    m ? parseInt(m.total)    : 0,
+        acceptes: m ? parseInt(m.acceptes) : 0,
+        montant:  m ? parseFloat(m.montant): 0
+      };
+    });
 
     res.json({
-      total_mois: parseInt(totalMois.rows[0].count),
-      acceptes_mois: parseInt(acceptesMois.rows[0].count),
-      montant_mois: parseFloat(acceptesMois.rows[0].montant) || 0,
-      derniers: derniers.rows
+      total_mois:               total,
+      acceptes_mois:            acceptes,
+      montant_mois:             montant,
+      taux_acceptation:         total > 0 ? Math.round(acceptes / total * 100) : 0,
+      total_precedent:          totalPrec,
+      acceptes_precedent:       acceptesPrec,
+      montant_precedent:        montantPrec,
+      taux_precedent:           totalPrec > 0 ? Math.round(acceptesPrec / totalPrec * 100) : 0,
+      factures_attente_nb:      parseInt(facturesAttente.rows[0].count),
+      factures_attente_montant: parseFloat(facturesAttente.rows[0].montant) || 0,
+      historique,
+      derniers:                 derniers.rows
     });
   } catch(err) { res.status(500).json({error: err.message}); }
 });
