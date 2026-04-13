@@ -109,7 +109,7 @@ async function sendEmail({ artisanNom, artisanEmail, to, subject, html, attachme
   if (attachments && attachments.length) {
     payload.attachments = attachments.map(a => ({
       ...a,
-      content_type: a.content_type || 'application/octet-stream'
+      content_type: a.content_type || 'application/pdf'
     }));
   }
   const response = await fetch('https://api.resend.com/emails', {
