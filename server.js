@@ -12,6 +12,15 @@ const pool = new Pool({
 });
 
 pool.query(`
+  CREATE TABLE IF NOT EXISTS artisan_prefs (
+    artisan_email  VARCHAR(255) PRIMARY KEY,
+    style_data     JSONB NOT NULL DEFAULT '{}',
+    updated_at     TIMESTAMP DEFAULT NOW()
+  )
+`).then(() => console.log('Table artisan_prefs OK'))
+  .catch(err => console.error('Erreur creation table artisan_prefs:', err));
+
+pool.query(`
   CREATE TABLE IF NOT EXISTS clients (
     id            SERIAL PRIMARY KEY,
     artisan_email VARCHAR(255) NOT NULL,
@@ -496,6 +505,58 @@ app.get('/api/siret/:siret', async (req, res) => {
       ville: siege.libelle_commune || '',
       activite: siege.activite_principale || ''
     });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== PRÉFÉRENCES ARTISAN (mémoire IA) =====
+
+app.get('/api/preferences', async (req, res) => {
+  const email = req.query.email;
+  if (!email) return res.status(400).json({ error: 'email requis' });
+  try {
+    const r = await pool.query('SELECT style_data FROM artisan_prefs WHERE artisan_email=$1', [email]);
+    res.json(r.rows.length ? r.rows[0].style_data : {});
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/preferences/update', async (req, res) => {
+  const { artisanEmail, observations, descriptions, acomptePct, metiers, conditions } = req.body;
+  if (!artisanEmail) return res.status(400).json({ error: 'artisanEmail requis' });
+  try {
+    // Récupérer les préfs existantes
+    const existing = await pool.query('SELECT style_data FROM artisan_prefs WHERE artisan_email=$1', [artisanEmail]);
+    const prev = existing.rows.length ? existing.rows[0].style_data : {};
+
+    // Garder les 5 dernières observations uniques
+    const obsActuelles = prev.observations_recentes || [];
+    const nouvObs = observations ? [observations, ...obsActuelles].filter(Boolean).filter((v,i,a) => a.indexOf(v) === i).slice(0, 5) : obsActuelles;
+
+    // Garder les 10 dernières formulations uniques
+    const formActuelles = prev.formulations_types || [];
+    const nouvForm = descriptions ? [...new Set([...descriptions, ...formActuelles])].slice(0, 10) : formActuelles;
+
+    // Garder les 5 métiers les plus fréquents
+    const metiersActuels = prev.metiers_frequents || {};
+    if (metiers && Array.isArray(metiers)) {
+      metiers.forEach(m => { metiersActuels[m] = (metiersActuels[m] || 0) + 1; });
+    }
+
+    const styleData = {
+      observations_recentes: nouvObs,
+      formulations_types:    nouvForm,
+      acompte_habituel:      acomptePct || prev.acompte_habituel || 0,
+      conditions_habituelles: conditions || prev.conditions_habituelles || '',
+      metiers_frequents:     metiersActuels,
+      updated_at:            new Date().toISOString()
+    };
+
+    await pool.query(
+      `INSERT INTO artisan_prefs (artisan_email, style_data, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (artisan_email) DO UPDATE SET style_data=$2, updated_at=NOW()`,
+      [artisanEmail, JSON.stringify(styleData)]
+    );
+    res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
