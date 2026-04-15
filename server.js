@@ -91,6 +91,20 @@ pool.query(`
     ADD COLUMN IF NOT EXISTS statut VARCHAR(20) DEFAULT 'actif',
     ADD COLUMN IF NOT EXISTS fusion_id VARCHAR(50)
   `)
+).then(() =>
+  pool.query(`
+    ALTER TABLE devis
+    ADD COLUMN IF NOT EXISTS famille VARCHAR(20)
+  `)
+).then(() =>
+  // Migration : remplir famille depuis le blob JSON pour les lignes existantes
+  pool.query(`
+    UPDATE devis
+    SET famille = data->>'famille'
+    WHERE famille IS NULL
+      AND data->>'famille' IS NOT NULL
+      AND data->>'famille' != ''
+  `)
 ).then(() => console.log('Table devis OK'))
   .catch(err => console.error('Erreur creation table:', err));
 
@@ -233,11 +247,12 @@ app.post('/api/devis/save', async (req, res) => {
         [id, libelle || null, artisanEmail]
       );
     } else {
+      const familleVal = (data && data.famille) || null;
       await pool.query(
-        `INSERT INTO devis (id, data, artisan_email, artisan_nom, client_email, libelle)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (id) DO UPDATE SET data=$2, artisan_nom=$4, libelle=COALESCE($6, devis.libelle)`,
-        [id, JSON.stringify(data), artisanEmail, artisanNom, clientEmail, libelle || null]
+        `INSERT INTO devis (id, data, artisan_email, artisan_nom, client_email, libelle, famille)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (id) DO UPDATE SET data=$2, artisan_nom=$4, libelle=COALESCE($6, devis.libelle), famille=COALESCE($7, devis.famille)`,
+        [id, JSON.stringify(data), artisanEmail, artisanNom, clientEmail, libelle || null, familleVal]
       );
     }
     res.json({ success: true, id });
