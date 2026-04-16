@@ -585,6 +585,15 @@ app.post('/api/preferences/update', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.delete('/api/preferences/reset', async (req, res) => {
+  const email = req.query.email;
+  if (!email) return res.status(400).json({ error: 'email requis' });
+  try {
+    await pool.query('DELETE FROM artisan_prefs WHERE artisan_email=$1', [email]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ===== STATS TABLEAU DE BORD =====
 app.get('/api/stats', async (req, res) => {
   const email = req.query.email;
