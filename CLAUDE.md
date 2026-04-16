@@ -232,8 +232,8 @@ sendEmail({ artisanNom, artisanEmail, to, subject, html })
 
 ### V2 — Planifiée
 
-- [ ] Onglet "Chantier en cours" avec validation de fin de chantier et envoi automatique de la facture au client et au comptable
-- [ ] Zone texte dictée à la voix pour les impératifs / remarques du chantier
+- [x] Onglet "Chantier en cours" avec validation de fin de chantier et envoi automatique de la facture au client et au comptable
+- [x] Zone texte dictée à la voix pour les impératifs / remarques du chantier
 - [x] Suivi des factures : statut payée / en attente / envoyée — badge + `PATCH /api/factures/:id/statut`
 - [x] Champ email comptable dans le profil artisan — copie automatique à chaque facture envoyée
 - [x] IA qui mémorise les modifications de l'artisan — titres de postes éditables, formulations, observations, acompte, métiers fréquents, carte "Habitudes détectées" + effacement
