@@ -234,9 +234,9 @@ sendEmail({ artisanNom, artisanEmail, to, subject, html })
 
 - [ ] Onglet "Chantier en cours" avec validation de fin de chantier et envoi automatique de la facture au client et au comptable
 - [ ] Zone texte dictée à la voix pour les impératifs / remarques du chantier
-- [ ] Suivi des factures : statut payée ou en attente
-- [ ] Champ email comptable dans le profil artisan
-- [ ] IA qui mémorise les modifications de l'artisan (préférences, formulations, habitudes)
+- [x] Suivi des factures : statut payée / en attente / envoyée — badge + `PATCH /api/factures/:id/statut`
+- [x] Champ email comptable dans le profil artisan — copie automatique à chaque facture envoyée
+- [x] IA qui mémorise les modifications de l'artisan — titres de postes éditables, formulations, observations, acompte, métiers fréquents, carte "Habitudes détectées" + effacement
 - [x] Mémoire client : table `clients` PostgreSQL liée à `artisan_email`, routes `POST /api/clients/save` + `GET /api/clients?email=&q=`, recherche multi-champs (nom, email, téléphone, adresse, ville, code postal, SIRET), autocomplétion + menu déroulant frontend
 - [ ] Site web public avec espace client authentifié et dashboard personnel
 
