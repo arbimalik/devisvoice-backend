@@ -3,6 +3,7 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
 const JWT_SECRET = process.env.JWT_SECRET || 'devisvoice_secret_2026';
 
 const app = express();
@@ -721,6 +722,10 @@ app.get('/api/stats', async (req, res) => {
   } catch(err) { res.status(500).json({error: err.message}); }
 });
 
+// Migration : colonne plan sur users
+pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS plan VARCHAR(50) DEFAULT 'gratuit'`)
+  .catch(err => console.error('Migration plan:', err));
+
 // ===== AUTHENTIFICATION UTILISATEURS =====
 
 app.post('/api/users/register', async (req, res) => {
@@ -817,6 +822,60 @@ app.post('/api/users/verify-token', async (req, res) => {
   } catch {
     res.json({ valid: false });
   }
+});
+
+// ===== STRIPE =====
+
+app.post('/api/stripe/create-checkout', async (req, res) => {
+  try {
+    const { priceId, userEmail, mode } = req.body;
+    if(!priceId || priceId === 'STRIPE_PRICE_ID_A_REMPLACER') {
+      return res.status(400).json({ error: 'Price ID non configuré' });
+    }
+    const session = await stripe.checkout.sessions.create({
+      mode: mode || 'subscription',
+      payment_method_types: ['card'],
+      customer_email: userEmail || undefined,
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: 'https://devisvoice.fr/pricing-success.html?session={CHECKOUT_SESSION_ID}',
+      cancel_url:  'https://devisvoice.fr/pricing.html'
+    });
+    res.json({ url: session.url });
+  } catch(err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET || '');
+  } catch(err) {
+    return res.status(400).json({ error: `Webhook signature invalide: ${err.message}` });
+  }
+
+  if(event.type === 'checkout.session.completed'){
+    const session = event.data.object;
+    const email   = session.customer_email || session.customer_details?.email;
+    const priceId = session.line_items?.data?.[0]?.price?.id;
+
+    // Détermine le plan selon le price_id
+    const planMap = {
+      [process.env.PRICE_STARTER_MENSUEL]: 'starter_mensuel',
+      [process.env.PRICE_STARTER_ANNUEL]:  'starter_annuel',
+      [process.env.PRICE_PRO_MENSUEL]:     'pro_mensuel',
+      [process.env.PRICE_PRO_ANNUEL]:      'pro_annuel'
+    };
+    const plan = planMap[priceId] || 'starter_mensuel';
+
+    if(email){
+      await pool.query('UPDATE users SET plan=$1, updated_at=NOW() WHERE email=$2', [plan, email])
+        .catch(err => console.error('Webhook update plan:', err));
+    }
+  }
+
+  res.json({ received: true });
 });
 
 const PORT = process.env.PORT || 8080;
