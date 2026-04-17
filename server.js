@@ -1,6 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'devisvoice_secret_2026';
 
 const app = express();
 app.use(cors());
@@ -107,6 +110,24 @@ pool.query(`
   `)
 ).then(() => console.log('Table devis OK'))
   .catch(err => console.error('Erreur creation table:', err));
+
+pool.query(`
+  CREATE TABLE IF NOT EXISTS users (
+    id               SERIAL PRIMARY KEY,
+    email            VARCHAR(255) UNIQUE NOT NULL,
+    prenom           VARCHAR(100),
+    nom              VARCHAR(100),
+    entreprise       VARCHAR(255),
+    telephone        VARCHAR(20),
+    mot_de_passe_hash VARCHAR(255),
+    famille          VARCHAR(50),
+    metiers          JSONB DEFAULT '[]',
+    document_type    VARCHAR(20) DEFAULT 'devis',
+    created_at       TIMESTAMP DEFAULT NOW(),
+    updated_at       TIMESTAMP DEFAULT NOW()
+  )
+`).then(() => console.log('Table users OK'))
+  .catch(err => console.error('Erreur table users:', err));
 
 // ===== HELPER ENVOI EMAIL CENTRALISÉ =====
 // Tous les emails partent depuis devis@devisvoice.fr
@@ -698,6 +719,104 @@ app.get('/api/stats', async (req, res) => {
       derniers:                 derniers.rows
     });
   } catch(err) { res.status(500).json({error: err.message}); }
+});
+
+// ===== AUTHENTIFICATION UTILISATEURS =====
+
+app.post('/api/users/register', async (req, res) => {
+  try {
+    const { email, prenom, nom, entreprise, telephone, mot_de_passe, famille, metiers, document_type } = req.body;
+    if (!email) return res.status(400).json({ success: false, error: 'Email requis' });
+
+    const hash = mot_de_passe ? await bcrypt.hash(mot_de_passe, 10) : null;
+
+    const result = await pool.query(
+      `INSERT INTO users (email, prenom, nom, entreprise, telephone, mot_de_passe_hash, famille, metiers, document_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (email) DO UPDATE
+         SET prenom=$2, nom=$3, entreprise=$4, telephone=$5,
+             famille=$7, metiers=$8, document_type=$9, updated_at=NOW()
+       RETURNING id, email, prenom, nom, entreprise, telephone, famille, metiers, document_type`,
+      [email, prenom || null, nom || null, entreprise || null, telephone || null,
+       hash, famille || null, JSON.stringify(metiers || []), document_type || 'devis']
+    );
+
+    const user = result.rows[0];
+    const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: '365d' });
+
+    res.json({
+      success: true, token,
+      userId: user.id, email: user.email,
+      prenom: user.prenom, nom: user.nom,
+      entreprise: user.entreprise, telephone: user.telephone,
+      famille: user.famille, metiers: user.metiers,
+      document_type: user.document_type
+    });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/users/login', async (req, res) => {
+  try {
+    const { email, mot_de_passe } = req.body;
+    if (!email || !mot_de_passe) return res.json({ success: false, error: 'Email et mot de passe requis' });
+
+    const result = await pool.query('SELECT * FROM users WHERE email=$1', [email]);
+    if (result.rows.length === 0) return res.json({ success: false, error: 'Email ou mot de passe incorrect' });
+
+    const user = result.rows[0];
+    if (!user.mot_de_passe_hash) return res.json({ success: false, error: 'Email ou mot de passe incorrect' });
+
+    const valid = await bcrypt.compare(mot_de_passe, user.mot_de_passe_hash);
+    if (!valid) return res.json({ success: false, error: 'Email ou mot de passe incorrect' });
+
+    const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: '365d' });
+
+    res.json({
+      success: true, token,
+      userId: user.id, email: user.email,
+      prenom: user.prenom, nom: user.nom,
+      entreprise: user.entreprise, telephone: user.telephone,
+      famille: user.famille, metiers: user.metiers,
+      document_type: user.document_type
+    });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/users/profile', async (req, res) => {
+  try {
+    const auth = req.headers.authorization;
+    if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'Token invalide', code: 'INVALID_TOKEN' });
+    const token = auth.slice(7);
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch {
+      return res.status(401).json({ error: 'Token invalide', code: 'INVALID_TOKEN' });
+    }
+    const result = await pool.query(
+      'SELECT id, email, prenom, nom, entreprise, telephone, famille, metiers, document_type, created_at FROM users WHERE id=$1',
+      [decoded.userId]
+    );
+    if (result.rows.length === 0) return res.status(401).json({ error: 'Token invalide', code: 'INVALID_TOKEN' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/users/verify-token', async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.json({ valid: false });
+    const decoded = jwt.verify(token, JWT_SECRET);
+    res.json({ valid: true, userId: decoded.userId, email: decoded.email });
+  } catch {
+    res.json({ valid: false });
+  }
 });
 
 const PORT = process.env.PORT || 8080;
