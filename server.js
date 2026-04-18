@@ -837,8 +837,9 @@ app.post('/api/users/verify-token', async (req, res) => {
 
 app.post('/api/stripe/create-checkout', async (req, res) => {
   try {
+    console.log('Stripe body reçu:', req.body);
     const { priceId, userEmail, mode } = req.body;
-    if(!priceId || priceId === 'STRIPE_PRICE_ID_A_REMPLACER') {
+    if(!priceId) {
       return res.status(400).json({ error: 'Price ID non configuré' });
     }
     const session = await stripe.checkout.sessions.create({
@@ -851,6 +852,7 @@ app.post('/api/stripe/create-checkout', async (req, res) => {
     });
     res.json({ url: session.url });
   } catch(err) {
+    console.log('Stripe error détail:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
