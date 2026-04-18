@@ -722,28 +722,37 @@ app.get('/api/stats', async (req, res) => {
   } catch(err) { res.status(500).json({error: err.message}); }
 });
 
-// Migration : colonne plan sur users
+// Migration : colonnes users
 pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS plan VARCHAR(50) DEFAULT 'gratuit'`)
   .catch(err => console.error('Migration plan:', err));
+
+pool.query(`
+  ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS famille TEXT,
+  ADD COLUMN IF NOT EXISTS metier TEXT,
+  ADD COLUMN IF NOT EXISTS plan VARCHAR(20) DEFAULT 'gratuit',
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()
+`).then(() => console.log('Colonnes users OK'))
+  .catch(err => console.error('ALTER users:', err));
 
 // ===== AUTHENTIFICATION UTILISATEURS =====
 
 app.post('/api/users/register', async (req, res) => {
   try {
-    const { email, prenom, nom, entreprise, telephone, mot_de_passe, famille, metiers, document_type } = req.body;
+    const { email, prenom, nom, entreprise, telephone, mot_de_passe, famille, metier, metiers, document_type } = req.body;
     if (!email) return res.status(400).json({ success: false, error: 'Email requis' });
 
     const hash = mot_de_passe ? await bcrypt.hash(mot_de_passe, 10) : null;
 
     const result = await pool.query(
-      `INSERT INTO users (email, prenom, nom, entreprise, telephone, mot_de_passe_hash, famille, metiers, document_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO users (email, prenom, nom, entreprise, telephone, mot_de_passe_hash, famille, metier, metiers, document_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (email) DO UPDATE
          SET prenom=$2, nom=$3, entreprise=$4, telephone=$5,
-             famille=$7, metiers=$8, document_type=$9, updated_at=NOW()
-       RETURNING id, email, prenom, nom, entreprise, telephone, famille, metiers, document_type`,
+             famille=$7, metier=$8, metiers=$9, document_type=$10, updated_at=NOW()
+       RETURNING id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type`,
       [email, prenom || null, nom || null, entreprise || null, telephone || null,
-       hash, famille || null, JSON.stringify(metiers || []), document_type || 'devis']
+       hash, famille || null, metier || null, JSON.stringify(metiers || []), document_type || 'devis']
     );
 
     const user = result.rows[0];
@@ -754,7 +763,7 @@ app.post('/api/users/register', async (req, res) => {
       userId: user.id, email: user.email,
       prenom: user.prenom, nom: user.nom,
       entreprise: user.entreprise, telephone: user.telephone,
-      famille: user.famille, metiers: user.metiers,
+      famille: user.famille, metier: user.metier, metiers: user.metiers,
       document_type: user.document_type
     });
   } catch (err) {
@@ -803,7 +812,7 @@ app.get('/api/users/profile', async (req, res) => {
       return res.status(401).json({ error: 'Token invalide', code: 'INVALID_TOKEN' });
     }
     const result = await pool.query(
-      'SELECT id, email, prenom, nom, entreprise, telephone, famille, metiers, document_type, created_at FROM users WHERE id=$1',
+      'SELECT id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type, plan, created_at FROM users WHERE id=$1',
       [decoded.userId]
     );
     if (result.rows.length === 0) return res.status(401).json({ error: 'Token invalide', code: 'INVALID_TOKEN' });
