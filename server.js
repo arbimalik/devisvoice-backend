@@ -1,9 +1,10 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
+const stripe = process.env.STRIPE_SECRET_KEY ? require('stripe')(process.env.STRIPE_SECRET_KEY) : null;
 const JWT_SECRET = process.env.JWT_SECRET || 'devisvoice_secret_2026';
 
 const app = express();
@@ -834,6 +835,33 @@ app.post('/api/users/verify-token', async (req, res) => {
 });
 
 // ===== STRIPE =====
+
+app.post('/api/stripe/checkout', async (req, res) => {
+  try {
+    const { priceId, userEmail } = req.body;
+    if(!priceId) return res.status(400).json({ error: 'Price ID non configuré' });
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if(!userEmail || !emailRegex.test(userEmail)){
+      return res.status(400).json({ error: 'Email invalide' });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      payment_method_types: ['card'],
+      payment_method_collection: 'always',
+      customer_email: userEmail,
+      line_items: [{ price: priceId, quantity: 1 }],
+      subscription_data: { trial_period_days: 30 },
+      success_url: 'https://devisvoice.fr/success.html?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url:  'https://devisvoice.fr/pricing.html'
+    });
+    res.json({ url: session.url });
+  } catch(err) {
+    console.log('Stripe checkout error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.post('/api/stripe/create-checkout', async (req, res) => {
   try {
