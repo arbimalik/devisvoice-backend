@@ -749,8 +749,15 @@ app.post('/api/users/register', async (req, res) => {
       `INSERT INTO users (email, prenom, nom, entreprise, telephone, mot_de_passe_hash, famille, metier, metiers, document_type)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (email) DO UPDATE
-         SET prenom=$2, nom=$3, entreprise=$4, telephone=$5,
-             famille=$7, metier=$8, metiers=$9, document_type=$10, updated_at=NOW()
+         SET prenom=COALESCE($2, users.prenom),
+             nom=COALESCE($3, users.nom),
+             entreprise=COALESCE($4, users.entreprise),
+             telephone=COALESCE($5, users.telephone),
+             famille=COALESCE($7, users.famille),
+             metier=COALESCE($8, users.metier),
+             metiers=COALESCE($9, users.metiers),
+             document_type=COALESCE($10, users.document_type),
+             updated_at=NOW()
        RETURNING id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type`,
       [email, prenom || null, nom || null, entreprise || null, telephone || null,
        hash, famille || null, metier || null, JSON.stringify(metiers || []), document_type || 'devis']
@@ -885,6 +892,31 @@ app.post('/api/stripe/create-checkout', async (req, res) => {
   }
 });
 
+app.get('/api/stripe/session/:sessionId', async (req, res) => {
+  if(!stripe) return res.status(500).json({ error: 'Stripe non configuré' });
+  try {
+    const session = await stripe.checkout.sessions.retrieve(req.params.sessionId, {
+      expand: ['line_items']
+    });
+    const priceId = session.line_items?.data?.[0]?.price?.id || '';
+    const planMap = {
+      'price_1TNaVs7LHQgZGOp76yslWd3O': 'starter',
+      'price_1TNaWo7LHQgZGOp7vTLsMTLI': 'starter',
+      'price_1TNaXu7LHQgZGOp7Ouzq7yHc': 'pro',
+      'price_1TNaXL7LHQgZGOp7HjJjdpfb': 'pro'
+    };
+    const plan  = planMap[priceId] || 'starter';
+    const email = session.customer_email || session.customer_details?.email || '';
+    if(email){
+      await pool.query('UPDATE users SET plan=$1, updated_at=NOW() WHERE email=$2', [plan, email])
+        .catch(err => console.error('Session update plan:', err));
+    }
+    res.json({ plan, email });
+  } catch(err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -896,17 +928,20 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
 
   if(event.type === 'checkout.session.completed'){
     const session = event.data.object;
-    const email   = session.customer_email || session.customer_details?.email;
-    const priceId = session.line_items?.data?.[0]?.price?.id;
+    const email = session.customer_email || session.customer_details?.email;
+    const fullSession = await stripe.checkout.sessions.retrieve(
+      session.id, { expand: ['line_items'] }
+    );
+    const priceId = fullSession.line_items?.data?.[0]?.price?.id;
 
-    // Détermine le plan selon le price_id
     const planMap = {
-      [process.env.PRICE_STARTER_MENSUEL]: 'starter_mensuel',
-      [process.env.PRICE_STARTER_ANNUEL]:  'starter_annuel',
-      [process.env.PRICE_PRO_MENSUEL]:     'pro_mensuel',
-      [process.env.PRICE_PRO_ANNUEL]:      'pro_annuel'
+      'price_1TNaVs7LHQgZGOp76yslWd3O': 'starter',
+      'price_1TNaWo7LHQgZGOp7vTLsMTLI': 'starter',
+      'price_1TNaXu7LHQgZGOp7Ouzq7yHc': 'pro',
+      'price_1TNaXL7LHQgZGOp7HjJjdpfb': 'pro'
     };
-    const plan = planMap[priceId] || 'starter_mensuel';
+    const plan = planMap[priceId] || 'starter';
+    console.log('Webhook session email:', email, 'priceId:', priceId, 'plan:', plan);
 
     if(email){
       await pool.query('UPDATE users SET plan=$1, updated_at=NOW() WHERE email=$2', [plan, email])
