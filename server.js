@@ -131,6 +131,29 @@ pool.query(`
 `).then(() => console.log('Table users OK'))
   .catch(err => console.error('Erreur table users:', err));
 
+pool.query(`
+  CREATE TABLE IF NOT EXISTS bon_commande (
+    id                 VARCHAR(20) PRIMARY KEY,
+    conducteur_email   VARCHAR(255) NOT NULL,
+    conducteur_nom     VARCHAR(255),
+    plaque             VARCHAR(20),
+    passager_nom       VARCHAR(255),
+    passager_email     VARCHAR(255),
+    passager_tel       VARCHAR(50),
+    date_commande      TIMESTAMP NOT NULL,
+    date_prise_charge  TIMESTAMP,
+    lieu_prise_charge  TEXT,
+    destination        TEXT,
+    distance_km        NUMERIC(8,2),
+    montant_ttc        NUMERIC(10,2),
+    pdf_html           TEXT,
+    created_at         TIMESTAMP DEFAULT NOW()
+  )
+`).then(() =>
+  pool.query(`CREATE INDEX IF NOT EXISTS idx_bon_commande_email ON bon_commande(conducteur_email)`)
+).then(() => console.log('Table bon_commande OK'))
+  .catch(err => console.error('Erreur table bon_commande:', err));
+
 // ===== HELPER ENVOI EMAIL CENTRALISÉ =====
 // Tous les emails partent depuis devis@devisvoice.fr
 // L'artisan apparaît comme expéditeur via le "from name"
@@ -732,7 +755,8 @@ pool.query(`
   ADD COLUMN IF NOT EXISTS famille TEXT,
   ADD COLUMN IF NOT EXISTS metier TEXT,
   ADD COLUMN IF NOT EXISTS plan VARCHAR(20) DEFAULT 'gratuit',
-  ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW(),
+  ADD COLUMN IF NOT EXISTS plaque VARCHAR(20)
 `).then(() => console.log('Colonnes users OK'))
   .catch(err => console.error('ALTER users:', err));
 
@@ -740,14 +764,14 @@ pool.query(`
 
 app.post('/api/users/register', async (req, res) => {
   try {
-    const { email, prenom, nom, entreprise, telephone, mot_de_passe, famille, metier, metiers, document_type } = req.body;
+    const { email, prenom, nom, entreprise, telephone, mot_de_passe, famille, metier, metiers, document_type, plaque } = req.body;
     if (!email) return res.status(400).json({ success: false, error: 'Email requis' });
 
     const hash = mot_de_passe ? await bcrypt.hash(mot_de_passe, 10) : null;
 
     const result = await pool.query(
-      `INSERT INTO users (email, prenom, nom, entreprise, telephone, mot_de_passe_hash, famille, metier, metiers, document_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO users (email, prenom, nom, entreprise, telephone, mot_de_passe_hash, famille, metier, metiers, document_type, plaque)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (email) DO UPDATE
          SET prenom=COALESCE($2, users.prenom),
              nom=COALESCE($3, users.nom),
@@ -757,10 +781,12 @@ app.post('/api/users/register', async (req, res) => {
              metier=COALESCE($8, users.metier),
              metiers=COALESCE($9, users.metiers),
              document_type=COALESCE($10, users.document_type),
+             plaque=COALESCE($11, users.plaque),
              updated_at=NOW()
-       RETURNING id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type`,
+       RETURNING id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type, plaque`,
       [email, prenom || null, nom || null, entreprise || null, telephone || null,
-       hash, famille || null, metier || null, JSON.stringify(metiers || []), document_type || 'devis']
+       hash, famille || null, metier || null, JSON.stringify(metiers || []), document_type || 'devis',
+       plaque || null]
     );
 
     const user = result.rows[0];
@@ -772,7 +798,8 @@ app.post('/api/users/register', async (req, res) => {
       prenom: user.prenom, nom: user.nom,
       entreprise: user.entreprise, telephone: user.telephone,
       famille: user.famille, metier: user.metier, metiers: user.metiers,
-      document_type: user.document_type
+      document_type: user.document_type,
+      plaque: user.plaque
     });
   } catch (err) {
     res.json({ success: false, error: err.message });
@@ -801,7 +828,8 @@ app.post('/api/users/login', async (req, res) => {
       prenom: user.prenom, nom: user.nom,
       entreprise: user.entreprise, telephone: user.telephone,
       famille: user.famille, metiers: user.metiers,
-      document_type: user.document_type
+      document_type: user.document_type,
+      plaque: user.plaque
     });
   } catch (err) {
     res.json({ success: false, error: err.message });
@@ -820,7 +848,7 @@ app.get('/api/users/profile', async (req, res) => {
       return res.status(401).json({ error: 'Token invalide', code: 'INVALID_TOKEN' });
     }
     const result = await pool.query(
-      'SELECT id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type, plan, created_at FROM users WHERE id=$1',
+      'SELECT id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type, plan, plaque, created_at FROM users WHERE id=$1',
       [decoded.userId]
     );
     if (result.rows.length === 0) return res.status(401).json({ error: 'Token invalide', code: 'INVALID_TOKEN' });
@@ -950,6 +978,107 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
   }
 
   res.json({ received: true });
+});
+
+// ===== BON DE COMMANDE VTC/TAXI =====
+
+// Numérotation BC-{annee}-{NNNN} avec 3-retry sur collision PRIMARY KEY
+app.post('/api/bon-commande/save', async (req, res) => {
+  const {
+    conducteurEmail, conducteurNom, plaque,
+    passagerNom, passagerEmail, passagerTel,
+    dateCommande, datePriseCharge, lieuPriseCharge, destination,
+    distanceKm, montantTTC, pdfHtml
+  } = req.body;
+
+  if (!conducteurEmail) return res.status(400).json({ error: 'conducteurEmail requis' });
+  if (!dateCommande)    return res.status(400).json({ error: 'dateCommande requise' });
+
+  const annee = new Date(dateCommande).getFullYear();
+
+  try {
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const maxResult = await pool.query(
+        `SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM '\\d+$') AS INT)), 0) AS max_num
+         FROM bon_commande
+         WHERE id LIKE $1`,
+        [`BC-${annee}-%`]
+      );
+      const nextNum = parseInt(maxResult.rows[0].max_num) + 1 + attempt;
+      const id = `BC-${annee}-${String(nextNum).padStart(4, '0')}`;
+
+      try {
+        const result = await pool.query(
+          `INSERT INTO bon_commande
+             (id, conducteur_email, conducteur_nom, plaque,
+              passager_nom, passager_email, passager_tel,
+              date_commande, date_prise_charge, lieu_prise_charge, destination,
+              distance_km, montant_ttc, pdf_html)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+           RETURNING id, created_at`,
+          [
+            id, conducteurEmail, conducteurNom || null, plaque || null,
+            passagerNom || null, passagerEmail || null, passagerTel || null,
+            dateCommande, datePriseCharge || null, lieuPriseCharge || null, destination || null,
+            distanceKm || null, montantTTC || null, pdfHtml || null
+          ]
+        );
+        return res.json({ success: true, id: result.rows[0].id, created_at: result.rows[0].created_at });
+      } catch (err) {
+        // 23505 = unique_violation (collision PRIMARY KEY entre 2 requêtes simultanées)
+        if (err.code === '23505') { lastError = err; continue; }
+        throw err;
+      }
+    }
+    throw lastError || new Error('Impossible de générer un ID unique après 3 tentatives');
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/bon-commande/:id', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM bon_commande WHERE id=$1', [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Bon de commande introuvable' });
+    res.json(result.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/bon-commande', async (req, res) => {
+  const email = req.query.email;
+  if (!email) return res.status(400).json({ error: 'email requis' });
+  try {
+    const result = await pool.query(
+      `SELECT id, conducteur_nom, plaque, passager_nom, passager_email, passager_tel,
+              date_commande, date_prise_charge, lieu_prise_charge, destination,
+              distance_km, montant_ttc, created_at
+       FROM bon_commande
+       WHERE conducteur_email=$1
+       ORDER BY date_commande DESC`,
+      [email]
+    );
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Envoi du bon de commande au passager (PDF en pièce jointe base64)
+app.post('/api/send-bon-commande', async (req, res) => {
+  const { conducteurNom, conducteurEmail, passagerEmail, subject, html, pdfBase64, numero } = req.body;
+  if (!conducteurEmail) return res.status(400).json({ error: 'conducteurEmail requis' });
+  if (!passagerEmail)   return res.status(400).json({ error: 'passagerEmail requis' });
+  try {
+    const attachments = pdfBase64
+      ? [{ filename: `${numero || 'bon-commande'}.pdf`, content: pdfBase64 }]
+      : [];
+    const data = await sendEmail({
+      artisanNom:   conducteurNom,
+      artisanEmail: conducteurEmail,
+      to:           passagerEmail,
+      subject:      subject || `Bon de commande ${numero || ''}`.trim(),
+      html,
+      attachments
+    });
+    res.json({ success: true, data });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 const PORT = process.env.PORT || 8080;
