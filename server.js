@@ -874,6 +874,90 @@ app.post('/api/users/verify-token', async (req, res) => {
   }
 });
 
+// Helper : décode le JWT depuis le header Authorization
+function decodeAuth(req){
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) return null;
+  try { return jwt.verify(auth.slice(7), JWT_SECRET); } catch { return null; }
+}
+
+// Mise à jour du compte (email et/ou mot de passe)
+app.put('/api/users/account', async (req, res) => {
+  const decoded = decodeAuth(req);
+  if (!decoded) return res.status(401).json({ success:false, error:'Token invalide' });
+  try {
+    const { email, mot_de_passe } = req.body;
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){
+      return res.status(400).json({ success:false, error:'Email invalide' });
+    }
+
+    const dup = await pool.query('SELECT id FROM users WHERE email=$1 AND id<>$2', [email, decoded.userId]);
+    if (dup.rows.length > 0) return res.status(409).json({ success:false, error:'Cet email est déjà utilisé.' });
+
+    if (mot_de_passe){
+      if (String(mot_de_passe).length < 6) return res.status(400).json({ success:false, error:'Mot de passe trop court' });
+      const hash = await bcrypt.hash(mot_de_passe, 10);
+      await pool.query('UPDATE users SET email=$1, mot_de_passe_hash=$2, updated_at=NOW() WHERE id=$3', [email, hash, decoded.userId]);
+    } else {
+      await pool.query('UPDATE users SET email=$1, updated_at=NOW() WHERE id=$2', [email, decoded.userId]);
+    }
+    res.json({ success:true, email });
+  } catch (err) {
+    res.status(500).json({ success:false, error: err.message });
+  }
+});
+
+// Suppression du compte et de toutes les données associées
+app.delete('/api/users/account', async (req, res) => {
+  const decoded = decodeAuth(req);
+  if (!decoded) return res.status(401).json({ success:false, error:'Token invalide' });
+  try {
+    const u = await pool.query('SELECT email FROM users WHERE id=$1', [decoded.userId]);
+    if (u.rows.length === 0) return res.status(404).json({ success:false, error:'Compte introuvable' });
+    const email = u.rows[0].email;
+
+    await pool.query('DELETE FROM devis WHERE artisan_email=$1', [email]).catch(()=>{});
+    await pool.query('DELETE FROM bon_commande WHERE conducteur_email=$1', [email]).catch(()=>{});
+    await pool.query('DELETE FROM factures WHERE artisan_email=$1', [email]).catch(()=>{});
+    await pool.query('DELETE FROM clients WHERE artisan_email=$1', [email]).catch(()=>{});
+    await pool.query('DELETE FROM artisan_prefs WHERE artisan_email=$1', [email]).catch(()=>{});
+    await pool.query('DELETE FROM users WHERE id=$1', [decoded.userId]);
+
+    res.json({ success:true });
+  } catch (err) {
+    res.status(500).json({ success:false, error: err.message });
+  }
+});
+
+// Export des données (compte + nombre de devis, sans contenu)
+app.get('/api/users/export', async (req, res) => {
+  const decoded = decodeAuth(req);
+  if (!decoded) return res.status(401).json({ error:'Token invalide' });
+  try {
+    const u = await pool.query(
+      'SELECT id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type, plan, plaque, taux_journalier, created_at FROM users WHERE id=$1',
+      [decoded.userId]
+    );
+    if (u.rows.length === 0) return res.status(404).json({ error:'Compte introuvable' });
+    const user = u.rows[0];
+
+    const devisRes = await pool.query(
+      'SELECT id, created_at FROM devis WHERE artisan_email=$1 ORDER BY created_at DESC',
+      [user.email]
+    );
+    const devisListe = devisRes.rows.map(d => ({ id: d.id, created_at: d.created_at }));
+
+    res.json({
+      exporte_le: new Date().toISOString(),
+      compte: user,
+      devis_count: devisListe.length,
+      devis: devisListe
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ===== STRIPE =====
 
 app.post('/api/stripe/checkout', async (req, res) => {
