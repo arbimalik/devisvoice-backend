@@ -316,9 +316,12 @@ app.get('/api/devis/:id', async (req, res) => {
 
 // ===== HISTORIQUE DEVIS =====
 app.get('/api/devis', async (req, res) => {
-  const email = req.query.email;
-  if (!email) return res.status(400).json({ error: 'Email requis' });
+  const decoded = decodeAuth(req);
+  if (!decoded) return res.status(401).json({ error: 'Token invalide' });
   try {
+    const u = await pool.query('SELECT email FROM users WHERE id=$1', [decoded.userId]);
+    if (u.rows.length === 0) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    const email = u.rows[0].email;
     const result = await pool.query(
       `SELECT id, data->>'total_ttc' as montant, data->'client'->>'nom' as client,
               accepted, statut, fusion_id, libelle, created_at
@@ -642,9 +645,12 @@ app.delete('/api/preferences/reset', async (req, res) => {
 
 // ===== STATS TABLEAU DE BORD =====
 app.get('/api/stats', async (req, res) => {
-  const email = req.query.email;
-  if(!email) return res.status(400).json({error: 'Email requis'});
+  const decoded = decodeAuth(req);
+  if(!decoded) return res.status(401).json({error: 'Token invalide'});
   try {
+    const u = await pool.query('SELECT email FROM users WHERE id=$1', [decoded.userId]);
+    if(u.rows.length === 0) return res.status(404).json({error: 'Utilisateur introuvable'});
+    const email = u.rows[0].email;
     // Bornes mois actuel
     const debutMois = new Date();
     debutMois.setDate(1); debutMois.setHours(0,0,0,0);
