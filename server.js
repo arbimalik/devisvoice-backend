@@ -756,7 +756,8 @@ pool.query(`
   ADD COLUMN IF NOT EXISTS metier TEXT,
   ADD COLUMN IF NOT EXISTS plan VARCHAR(20) DEFAULT 'gratuit',
   ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW(),
-  ADD COLUMN IF NOT EXISTS plaque VARCHAR(20)
+  ADD COLUMN IF NOT EXISTS plaque VARCHAR(20),
+  ADD COLUMN IF NOT EXISTS taux_journalier NUMERIC(10,2)
 `).then(() => console.log('Colonnes users OK'))
   .catch(err => console.error('ALTER users:', err));
 
@@ -764,14 +765,15 @@ pool.query(`
 
 app.post('/api/users/register', async (req, res) => {
   try {
-    const { email, prenom, nom, entreprise, telephone, mot_de_passe, famille, metier, metiers, document_type, plaque } = req.body;
+    const { email, prenom, nom, entreprise, telephone, mot_de_passe, famille, metier, metiers, document_type, plaque, taux_journalier } = req.body;
     if (!email) return res.status(400).json({ success: false, error: 'Email requis' });
 
     const hash = mot_de_passe ? await bcrypt.hash(mot_de_passe, 10) : null;
+    const tj = (taux_journalier === undefined || taux_journalier === null || taux_journalier === '') ? null : Number(taux_journalier);
 
     const result = await pool.query(
-      `INSERT INTO users (email, prenom, nom, entreprise, telephone, mot_de_passe_hash, famille, metier, metiers, document_type, plaque)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO users (email, prenom, nom, entreprise, telephone, mot_de_passe_hash, famille, metier, metiers, document_type, plaque, taux_journalier)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (email) DO UPDATE
          SET prenom=COALESCE($2, users.prenom),
              nom=COALESCE($3, users.nom),
@@ -782,11 +784,12 @@ app.post('/api/users/register', async (req, res) => {
              metiers=COALESCE($9, users.metiers),
              document_type=COALESCE($10, users.document_type),
              plaque=COALESCE($11, users.plaque),
+             taux_journalier=COALESCE($12, users.taux_journalier),
              updated_at=NOW()
-       RETURNING id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type, plaque`,
+       RETURNING id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type, plaque, taux_journalier`,
       [email, prenom || null, nom || null, entreprise || null, telephone || null,
        hash, famille || null, metier || null, JSON.stringify(metiers || []), document_type || 'devis',
-       plaque || null]
+       plaque || null, tj]
     );
 
     const user = result.rows[0];
@@ -799,7 +802,8 @@ app.post('/api/users/register', async (req, res) => {
       entreprise: user.entreprise, telephone: user.telephone,
       famille: user.famille, metier: user.metier, metiers: user.metiers,
       document_type: user.document_type,
-      plaque: user.plaque
+      plaque: user.plaque,
+      taux_journalier: user.taux_journalier
     });
   } catch (err) {
     res.json({ success: false, error: err.message });
@@ -829,7 +833,8 @@ app.post('/api/users/login', async (req, res) => {
       entreprise: user.entreprise, telephone: user.telephone,
       famille: user.famille, metiers: user.metiers,
       document_type: user.document_type,
-      plaque: user.plaque
+      plaque: user.plaque,
+      taux_journalier: user.taux_journalier
     });
   } catch (err) {
     res.json({ success: false, error: err.message });
@@ -848,7 +853,7 @@ app.get('/api/users/profile', async (req, res) => {
       return res.status(401).json({ error: 'Token invalide', code: 'INVALID_TOKEN' });
     }
     const result = await pool.query(
-      'SELECT id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type, plan, plaque, created_at FROM users WHERE id=$1',
+      'SELECT id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type, plan, plaque, taux_journalier, created_at FROM users WHERE id=$1',
       [decoded.userId]
     );
     if (result.rows.length === 0) return res.status(401).json({ error: 'Token invalide', code: 'INVALID_TOKEN' });
