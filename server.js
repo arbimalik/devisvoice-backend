@@ -556,13 +556,17 @@ app.post('/api/clients/save', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Liste tous les clients d'un artisan (pour menu déroulant)
+// Liste tous les clients de l'artisan authentifié (pour menu déroulant)
 // Si q est fourni : filtre par nom ou SIRET (autocomplétion)
 // Si q est absent  : retourne tous les clients triés par nom
 app.get('/api/clients', async (req, res) => {
-  const { email, q } = req.query;
-  if (!email) return res.status(400).json({ error: 'email requis' });
+  const decoded = decodeAuth(req);
+  if (!decoded) return res.status(401).json({ error: 'Token invalide' });
   try {
+    const u = await pool.query('SELECT email FROM users WHERE id=$1', [decoded.userId]);
+    if (u.rows.length === 0) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    const email = u.rows[0].email;
+    const { q } = req.query;
     let result;
     if (q && q.trim()) {
       result = await pool.query(
