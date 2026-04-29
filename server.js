@@ -837,24 +837,17 @@ app.post('/api/users/register', async (req, res) => {
     const { email, prenom, nom, entreprise, telephone, mot_de_passe, famille, metier, metiers, document_type, plaque, taux_journalier } = req.body;
     if (!email) return res.status(400).json({ success: false, error: 'Email requis' });
 
+    const existing = await pool.query('SELECT id FROM users WHERE email=$1', [email]);
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ success: false, error: 'Un compte existe déjà avec cet email', code: 'EMAIL_EXISTS' });
+    }
+
     const hash = mot_de_passe ? await bcrypt.hash(mot_de_passe, 10) : null;
     const tj = (taux_journalier === undefined || taux_journalier === null || taux_journalier === '') ? null : Number(taux_journalier);
 
     const result = await pool.query(
       `INSERT INTO users (email, prenom, nom, entreprise, telephone, mot_de_passe_hash, famille, metier, metiers, document_type, plaque, taux_journalier)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-       ON CONFLICT (email) DO UPDATE
-         SET prenom=COALESCE($2, users.prenom),
-             nom=COALESCE($3, users.nom),
-             entreprise=COALESCE($4, users.entreprise),
-             telephone=COALESCE($5, users.telephone),
-             famille=COALESCE($7, users.famille),
-             metier=COALESCE($8, users.metier),
-             metiers=COALESCE($9, users.metiers),
-             document_type=COALESCE($10, users.document_type),
-             plaque=COALESCE($11, users.plaque),
-             taux_journalier=COALESCE($12, users.taux_journalier),
-             updated_at=NOW()
        RETURNING id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type, plaque, taux_journalier`,
       [email, prenom || null, nom || null, entreprise || null, telephone || null,
        hash, famille || null, metier || null, JSON.stringify(metiers || []), document_type || 'devis',
