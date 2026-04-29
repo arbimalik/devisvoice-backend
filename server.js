@@ -903,6 +903,40 @@ app.post('/api/users/login', async (req, res) => {
   }
 });
 
+app.put('/api/users/account', async (req, res) => {
+  try {
+    const decoded = decodeAuth(req);
+    if (!decoded) return res.status(401).json({ error: 'Token invalide' });
+    const { prenom, nom, entreprise, telephone, famille, metier, metiers, document_type, plaque, taux_journalier } = req.body;
+    const tj = (taux_journalier === undefined || taux_journalier === null || taux_journalier === '') ? null : Number(taux_journalier);
+    const metiersJson = metiers !== undefined ? JSON.stringify(metiers) : null;
+    const result = await pool.query(
+      `UPDATE users
+         SET prenom=COALESCE($2, prenom),
+             nom=COALESCE($3, nom),
+             entreprise=COALESCE($4, entreprise),
+             telephone=COALESCE($5, telephone),
+             famille=COALESCE($6, famille),
+             metier=COALESCE($7, metier),
+             metiers=COALESCE($8::jsonb, metiers),
+             document_type=COALESCE($9, document_type),
+             plaque=COALESCE($10, plaque),
+             taux_journalier=COALESCE($11, taux_journalier),
+             updated_at=NOW()
+       WHERE id=$1
+       RETURNING id, email, prenom, nom, entreprise, telephone, famille, metier, metiers, document_type, plaque, taux_journalier`,
+      [decoded.userId,
+       prenom || null, nom || null, entreprise || null, telephone || null,
+       famille || null, metier || null, metiersJson,
+       document_type || null, plaque || null, tj]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    res.json({ success: true, ...result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/users/profile', async (req, res) => {
   try {
     const auth = req.headers.authorization;
