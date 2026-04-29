@@ -110,6 +110,16 @@ pool.query(`
       AND data->>'famille' IS NOT NULL
       AND data->>'famille' != ''
   `)
+).then(() =>
+  // Token de partage UUID — accès public sécurisé pour le client final
+  // (lien d'acceptation envoyé par email). DEFAULT gen_random_uuid() backfill
+  // automatique des lignes existantes en PostgreSQL 11+.
+  pool.query(`
+    ALTER TABLE devis
+    ADD COLUMN IF NOT EXISTS share_token UUID DEFAULT gen_random_uuid()
+  `)
+).then(() =>
+  pool.query(`CREATE INDEX IF NOT EXISTS devis_share_token_idx ON devis (share_token)`)
 ).then(() => console.log('Table devis OK'))
   .catch(err => console.error('Erreur creation table:', err));
 
@@ -292,26 +302,55 @@ app.post('/api/devis/save', async (req, res) => {
         'UPDATE devis SET libelle=$2 WHERE id=$1 AND artisan_email=$3',
         [id, libelle || null, artisanEmail]
       );
+      res.json({ success: true, id });
     } else {
       const familleVal = (data && data.famille) || null;
-      await pool.query(
+      const result = await pool.query(
         `INSERT INTO devis (id, data, artisan_email, artisan_nom, client_email, libelle, famille)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (id) DO UPDATE SET data=$2, artisan_nom=$4, libelle=COALESCE($6, devis.libelle), famille=COALESCE($7, devis.famille)`,
+         ON CONFLICT (id) DO UPDATE SET data=$2, artisan_nom=$4, libelle=COALESCE($6, devis.libelle), famille=COALESCE($7, devis.famille)
+         RETURNING share_token`,
         [id, JSON.stringify(data), artisanEmail, artisanNom, clientEmail, libelle || null, familleVal]
       );
+      res.json({ success: true, id, share_token: result.rows[0].share_token });
     }
-    res.json({ success: true, id });
   } catch (err) { res.status(500).json({error: err.message}); }
 });
 
-// ===== GET DEVIS =====
+// ===== GET DEVIS (artisan authentifié uniquement) =====
+// Pour l'accès public du client final via lien email, voir /api/devis/share/:token
 app.get('/api/devis/:id', async (req, res) => {
+  const decoded = decodeAuth(req);
+  if (!decoded) return res.status(401).json({ error: 'Token invalide' });
   try {
-    const result = await pool.query('SELECT * FROM devis WHERE id=$1', [req.params.id]);
-    if(result.rows.length === 0) return res.status(404).json({error: 'Devis introuvable'});
+    const u = await pool.query('SELECT email FROM users WHERE id=$1', [decoded.userId]);
+    if (u.rows.length === 0) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    const email = u.rows[0].email;
+    const result = await pool.query(
+      'SELECT * FROM devis WHERE id=$1 AND artisan_email=$2',
+      [req.params.id, email]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Devis introuvable' });
     res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({error: err.message}); }
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== GET DEVIS PAR TOKEN DE PARTAGE (accès public client final) =====
+// Le client n'est pas authentifié. Le token UUID non-devinable est envoyé
+// dans le lien d'acceptation par email.
+app.get('/api/devis/share/:token', async (req, res) => {
+  const token = req.params.token;
+  if (!/^[0-9a-f-]{36}$/i.test(token)) {
+    return res.status(400).json({ error: 'Token invalide' });
+  }
+  try {
+    const result = await pool.query(
+      'SELECT * FROM devis WHERE share_token=$1',
+      [token]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Devis introuvable' });
+    res.json(result.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ===== HISTORIQUE DEVIS =====
