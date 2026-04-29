@@ -527,13 +527,18 @@ app.get('/api/factures/:id', async (req, res) => {
 
 // Mise à jour du statut (non_envoyee → envoyee → payee)
 app.patch('/api/factures/:id/statut', async (req, res) => {
+  const decoded = decodeAuth(req);
+  if (!decoded) return res.status(401).json({ error: 'Token invalide' });
   const { statut } = req.body;
   const statuts = ['non_envoyee', 'envoyee', 'en_attente', 'payee'];
   if (!statuts.includes(statut)) return res.status(400).json({ error: 'Statut invalide' });
   try {
+    const u = await pool.query('SELECT email FROM users WHERE id=$1', [decoded.userId]);
+    if (u.rows.length === 0) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    const email = u.rows[0].email;
     const result = await pool.query(
-      'UPDATE factures SET statut=$2, updated_at=NOW() WHERE id=$1 RETURNING *',
-      [req.params.id, statut]
+      'UPDATE factures SET statut=$2, updated_at=NOW() WHERE id=$1 AND artisan_email=$3 RETURNING *',
+      [req.params.id, statut, email]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Facture introuvable' });
     res.json({ success: true, statut: result.rows[0].statut });
