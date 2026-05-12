@@ -830,6 +830,15 @@ pool.query(`
 `).then(() => console.log('Colonnes users OK'))
   .catch(err => console.error('ALTER users:', err));
 
+pool.query(`
+  ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(255),
+  ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(255),
+  ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50) DEFAULT 'none',
+  ADD COLUMN IF NOT EXISTS subscription_current_period_end TIMESTAMP
+`).then(() => console.log('Colonnes Stripe users OK'))
+  .catch(err => console.error('Migration Stripe users:', err));
+
 // ===== AUTHENTIFICATION UTILISATEURS =====
 
 app.post('/api/users/register', async (req, res) => {
@@ -1056,21 +1065,36 @@ app.get('/api/users/export', async (req, res) => {
 
 // ===== STRIPE =====
 
+const planMap = {
+  [process.env.STRIPE_PRICE_STARTER || 'price_1TNaVs7LHQgZGOp76yslWd3O']: 'starter',
+  'price_1TNaWo7LHQgZGOp7vTLsMTLI': 'starter',
+  [process.env.STRIPE_PRICE_PRO    || 'price_1TNaXu7LHQgZGOp7Ouzq7yHc']: 'pro',
+  'price_1TNaXL7LHQgZGOp7HjJjdpfb': 'pro'
+};
+
 app.post('/api/stripe/checkout', async (req, res) => {
+  const decoded = decodeAuth(req);
+  if (!decoded) return res.status(401).json({ error: 'Token invalide' });
   try {
-    const { priceId, userEmail } = req.body;
+    const { priceId } = req.body;
     if(!priceId) return res.status(400).json({ error: 'Price ID non configuré' });
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if(!userEmail || !emailRegex.test(userEmail)){
-      return res.status(400).json({ error: 'Email invalide' });
+    // Récupère ou crée le customer Stripe et le stocke en base
+    const userRow = await pool.query('SELECT email, stripe_customer_id FROM users WHERE id=$1', [decoded.userId]);
+    const dbUser = userRow.rows[0];
+    if (!dbUser) return res.status(401).json({ error: 'Utilisateur introuvable' });
+    let stripeCustomerId = dbUser.stripe_customer_id;
+    if (!stripeCustomerId) {
+      const customer = await stripe.customers.create({ email: dbUser.email });
+      stripeCustomerId = customer.id;
+      await pool.query('UPDATE users SET stripe_customer_id=$1 WHERE id=$2', [stripeCustomerId, decoded.userId]);
     }
 
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       payment_method_types: ['card'],
       payment_method_collection: 'always',
-      customer_email: userEmail,
+      customer: stripeCustomerId,
       line_items: [{ price: priceId, quantity: 1 }],
       subscription_data: { trial_period_days: 30 },
       success_url: 'https://devisvoice.fr/success.html?session_id={CHECKOUT_SESSION_ID}',
@@ -1084,16 +1108,26 @@ app.post('/api/stripe/checkout', async (req, res) => {
 });
 
 app.post('/api/stripe/create-checkout', async (req, res) => {
+  const decoded = decodeAuth(req);
+  if (!decoded) return res.status(401).json({ error: 'Token invalide' });
   try {
-    console.log('Stripe body reçu:', req.body);
-    const { priceId, userEmail, mode } = req.body;
+    const { priceId, mode } = req.body;
     if(!priceId) {
       return res.status(400).json({ error: 'Price ID non configuré' });
+    }
+    const userRow = await pool.query('SELECT email, stripe_customer_id FROM users WHERE id=$1', [decoded.userId]);
+    const dbUser = userRow.rows[0];
+    if (!dbUser) return res.status(401).json({ error: 'Utilisateur introuvable' });
+    let stripeCustomerId = dbUser.stripe_customer_id;
+    if (!stripeCustomerId) {
+      const customer = await stripe.customers.create({ email: dbUser.email });
+      stripeCustomerId = customer.id;
+      await pool.query('UPDATE users SET stripe_customer_id=$1 WHERE id=$2', [stripeCustomerId, decoded.userId]);
     }
     const session = await stripe.checkout.sessions.create({
       mode: mode || 'subscription',
       payment_method_types: ['card'],
-      customer_email: userEmail || undefined,
+      customer: stripeCustomerId,
       line_items: [{ price: priceId, quantity: 1 }],
       success_url: 'https://devisvoice.fr/pricing-success.html?session={CHECKOUT_SESSION_ID}',
       cancel_url:  'https://devisvoice.fr/pricing.html'
@@ -1112,12 +1146,6 @@ app.get('/api/stripe/session/:sessionId', async (req, res) => {
       expand: ['line_items']
     });
     const priceId = session.line_items?.data?.[0]?.price?.id || '';
-    const planMap = {
-      'price_1TNaVs7LHQgZGOp76yslWd3O': 'starter',
-      'price_1TNaWo7LHQgZGOp7vTLsMTLI': 'starter',
-      'price_1TNaXu7LHQgZGOp7Ouzq7yHc': 'pro',
-      'price_1TNaXL7LHQgZGOp7HjJjdpfb': 'pro'
-    };
     const plan  = planMap[priceId] || 'starter';
     const email = session.customer_email || session.customer_details?.email || '';
     if(email){
@@ -1131,38 +1159,80 @@ app.get('/api/stripe/session/:sessionId', async (req, res) => {
 });
 
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!process.env.STRIPE_WEBHOOK_SECRET) {
+    console.error('STRIPE_WEBHOOK_SECRET non configuré — webhook rejeté');
+    return res.status(500).json({ error: 'Configuration serveur invalide' });
+  }
   const sig = req.headers['stripe-signature'];
   let event;
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET || '');
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
   } catch(err) {
     return res.status(400).json({ error: `Webhook signature invalide: ${err.message}` });
   }
 
   if(event.type === 'checkout.session.completed'){
     const session = event.data.object;
-    const email = session.customer_email || session.customer_details?.email;
-    const fullSession = await stripe.checkout.sessions.retrieve(
-      session.id, { expand: ['line_items'] }
-    );
+    const stripeCustomerId = session.customer;
+    const subscriptionId   = session.subscription;
+    const fullSession = await stripe.checkout.sessions.retrieve(session.id, { expand: ['line_items'] });
     const priceId = fullSession.line_items?.data?.[0]?.price?.id;
-
-    const planMap = {
-      'price_1TNaVs7LHQgZGOp76yslWd3O': 'starter',
-      'price_1TNaWo7LHQgZGOp7vTLsMTLI': 'starter',
-      'price_1TNaXu7LHQgZGOp7Ouzq7yHc': 'pro',
-      'price_1TNaXL7LHQgZGOp7HjJjdpfb': 'pro'
-    };
     const plan = planMap[priceId] || 'starter';
-    console.log('Webhook session email:', email, 'priceId:', priceId, 'plan:', plan);
-
-    if(email){
-      await pool.query('UPDATE users SET plan=$1, updated_at=NOW() WHERE email=$2', [plan, email])
-        .catch(err => console.error('Webhook update plan:', err));
+    console.log('Webhook checkout.session.completed — customer:', stripeCustomerId, 'plan:', plan);
+    if(stripeCustomerId){
+      await pool.query(
+        `UPDATE users SET plan=$1, stripe_subscription_id=$2,
+         subscription_status='active', updated_at=NOW() WHERE stripe_customer_id=$3`,
+        [plan, subscriptionId, stripeCustomerId]
+      ).catch(err => console.error('Webhook checkout update:', err));
     }
   }
 
+  if(event.type === 'customer.subscription.updated'){
+    const sub = event.data.object;
+    await pool.query(
+      `UPDATE users SET subscription_status=$1, subscription_current_period_end=$2,
+       stripe_subscription_id=$3, updated_at=NOW() WHERE stripe_customer_id=$4`,
+      [sub.status, new Date(sub.current_period_end * 1000), sub.id, sub.customer]
+    ).catch(err => console.error('Webhook subscription.updated:', err));
+  }
+
+  if(event.type === 'customer.subscription.deleted'){
+    const sub = event.data.object;
+    await pool.query(
+      `UPDATE users SET plan='gratuit', subscription_status='canceled',
+       stripe_subscription_id=NULL, updated_at=NOW() WHERE stripe_customer_id=$1`,
+      [sub.customer]
+    ).catch(err => console.error('Webhook subscription.deleted:', err));
+  }
+
+  if(event.type === 'invoice.payment_failed'){
+    const invoice = event.data.object;
+    await pool.query(
+      `UPDATE users SET subscription_status='past_due', updated_at=NOW() WHERE stripe_customer_id=$1`,
+      [invoice.customer]
+    ).catch(err => console.error('Webhook invoice.payment_failed:', err));
+  }
+
   res.json({ received: true });
+});
+
+app.post('/api/stripe/billing-portal', async (req, res) => {
+  const decoded = decodeAuth(req);
+  if (!decoded) return res.status(401).json({ error: 'Token invalide' });
+  if (!stripe) return res.status(500).json({ error: 'Stripe non configuré' });
+  try {
+    const result = await pool.query('SELECT stripe_customer_id FROM users WHERE id=$1', [decoded.userId]);
+    const user = result.rows[0];
+    if (!user?.stripe_customer_id) return res.status(400).json({ error: 'Aucun abonnement Stripe trouvé' });
+    const portalSession = await stripe.billingPortal.sessions.create({
+      customer: user.stripe_customer_id,
+      return_url: 'https://devisvoice.fr/app'
+    });
+    res.json({ url: portalSession.url });
+  } catch(err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ===== BON DE COMMANDE VTC/TAXI =====
