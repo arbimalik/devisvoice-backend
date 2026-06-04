@@ -3,6 +3,21 @@ const pool = require('../db');
 
 router.post('/claude', async (req, res) => {
   try {
+    const email = req.user.email;
+    const userRow = await pool.query('SELECT plan FROM users WHERE email=$1', [email]);
+    const plan = (userRow.rows[0]?.plan || 'gratuit').toLowerCase();
+    const DEVIS_LIMITS = { gratuit: 3, starter: 10 };
+    const devisLimit = DEVIS_LIMITS[plan];
+    if (devisLimit !== undefined) {
+      const countRes = await pool.query(
+        "SELECT COUNT(*) AS count FROM devis WHERE artisan_email=$1 AND created_at >= date_trunc('month', NOW()) AND statut != 'fusionné'",
+        [email]
+      );
+      if (parseInt(countRes.rows[0].count) >= devisLimit) {
+        return res.status(403).json({ error: `Limite de ${devisLimit} devis/mois atteinte sur votre plan.`, code: 'QUOTA_EXCEEDED' });
+      }
+    }
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {

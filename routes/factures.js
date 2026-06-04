@@ -6,6 +6,11 @@ router.post('/send-fin-chantier', async (req, res) => {
   const { artisanNom, clientEmail, comptableEmail, clientNom, numero, montant, html, pdfBase64 } = req.body;
   const artisanEmail = req.user.email;
   try {
+    const userRow = await pool.query('SELECT plan FROM users WHERE email=$1', [artisanEmail]);
+    const plan = (userRow.rows[0]?.plan || 'gratuit').toLowerCase();
+    if (plan === 'gratuit') {
+      return res.status(403).json({ error: 'L\'envoi de factures est réservé aux plans payants.', code: 'PLAN_UPGRADE_REQUIRED' });
+    }
     const subject = `Facture ${numero} - ${artisanNom}`;
     const attachments = pdfBase64
       ? [{ filename: `${numero}.pdf`, content: pdfBase64 }]
@@ -42,6 +47,17 @@ router.post('/factures/save', async (req, res) => {
         [id, libelle || null, artisanEmail]
       );
     } else {
+      const userRow = await pool.query('SELECT plan FROM users WHERE email=$1', [artisanEmail]);
+      const plan = (userRow.rows[0]?.plan || 'gratuit').toLowerCase();
+      if (plan === 'starter') {
+        const countRes = await pool.query(
+          "SELECT COUNT(*) AS count FROM factures WHERE artisan_email=$1 AND created_at >= date_trunc('month', NOW())",
+          [artisanEmail]
+        );
+        if (parseInt(countRes.rows[0].count) >= 10) {
+          return res.status(403).json({ error: 'Limite de 10 factures/mois atteinte sur le plan Pro.', code: 'QUOTA_EXCEEDED' });
+        }
+      }
       await pool.query(
         `INSERT INTO factures (id, devis_id, artisan_email, client_nom, numero, lignes, libelle, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())

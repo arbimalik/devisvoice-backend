@@ -17,6 +17,19 @@ router.post('/bon-commande/save', async (req, res) => {
   const annee = new Date(dateCommande).getFullYear();
 
   try {
+    const userRow = await pool.query('SELECT plan FROM users WHERE email=$1', [conducteurEmail]);
+    const plan = (userRow.rows[0]?.plan || 'gratuit').toLowerCase();
+    const BDC_LIMITS = { gratuit: 3, starter: 10 };
+    const bdcLimit = BDC_LIMITS[plan];
+    if (bdcLimit !== undefined) {
+      const countRes = await pool.query(
+        "SELECT COUNT(*) AS count FROM bon_commande WHERE conducteur_email=$1 AND created_at >= date_trunc('month', NOW())",
+        [conducteurEmail]
+      );
+      if (parseInt(countRes.rows[0].count) >= bdcLimit) {
+        return res.status(403).json({ error: `Limite de ${bdcLimit} bons de commande/mois atteinte sur votre plan.`, code: 'QUOTA_EXCEEDED' });
+      }
+    }
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
       const maxResult = await pool.query(
