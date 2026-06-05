@@ -2,9 +2,11 @@ const router = require('express').Router();
 const pool = require('../db');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const { randomUUID } = require('crypto');
 const JWT_SECRET = process.env.JWT_SECRET || 'devisvoice_secret_2026';
 const { sendEmail } = require('../helpers/email');
 const { buildEmailBienvenue } = require('../helpers/emailBienvenue');
+const BASE_URL = 'https://arbimalik.github.io/devisvoice';
 
 router.post('/users/register', async (req, res) => {
   try {
@@ -138,6 +140,58 @@ router.post('/users/verify-token', async (req, res) => {
   } catch {
     res.json({ valid: false });
   }
+});
+
+router.post('/users/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email requis' });
+  try {
+    const result = await pool.query('SELECT id, prenom FROM users WHERE email=$1', [email]);
+    if (result.rows.length === 0) return res.json({ success: true }); // ne pas révéler si l'email existe
+    const user = result.rows[0];
+    const token = randomUUID();
+    const expires = new Date(Date.now() + 60 * 60 * 1000);
+    await pool.query(
+      'UPDATE users SET reset_token=$1, reset_token_expires=$2 WHERE id=$3',
+      [token, expires, user.id]
+    );
+    const resetLink = `${BASE_URL}/reset-password.html?token=${token}`;
+    const html = `
+      <div style="font-family:Inter,sans-serif;max-width:480px;margin:0 auto;background:#0d0d0d;color:#fff;padding:32px;border-radius:12px;">
+        <div style="font-size:22px;font-weight:800;margin-bottom:24px;">Devis<span style="color:#FF4500;">Voice</span></div>
+        <p style="margin-bottom:16px;">Bonjour${user.prenom ? ' ' + user.prenom : ''},</p>
+        <p style="margin-bottom:24px;color:#ccc;">Vous avez demandé à réinitialiser votre mot de passe. Cliquez sur le bouton ci-dessous — le lien est valable <strong>1 heure</strong>.</p>
+        <a href="${resetLink}" style="display:inline-block;background:#FF4500;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px;">Réinitialiser mon mot de passe</a>
+        <p style="margin-top:24px;font-size:12px;color:#555;">Si vous n'êtes pas à l'origine de cette demande, ignorez cet email. Votre mot de passe ne changera pas.</p>
+      </div>`;
+    await sendEmail({
+      artisanNom: 'Équipe DevisVoice',
+      artisanEmail: 'contact@devisvoice.fr',
+      to: email,
+      subject: 'Réinitialisation de votre mot de passe DevisVoice',
+      html
+    });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/users/reset-password', async (req, res) => {
+  const { token, mot_de_passe } = req.body;
+  if (!token || !mot_de_passe) return res.status(400).json({ error: 'Paramètres manquants' });
+  if (mot_de_passe.length < 6) return res.status(400).json({ error: 'Le mot de passe doit faire au moins 6 caractères' });
+  try {
+    const result = await pool.query(
+      'SELECT id FROM users WHERE reset_token=$1 AND reset_token_expires > NOW()',
+      [token]
+    );
+    if (result.rows.length === 0) return res.status(400).json({ error: 'Lien invalide ou expiré. Recommencez la procédure.' });
+    const hash = await bcrypt.hash(mot_de_passe, 10);
+    await pool.query(
+      'UPDATE users SET mot_de_passe_hash=$1, reset_token=NULL, reset_token_expires=NULL WHERE id=$2',
+      [hash, result.rows[0].id]
+    );
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 router.delete('/users/account', async (req, res) => {

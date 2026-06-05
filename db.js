@@ -177,4 +177,11 @@ pool.query(`
 `).then(() => console.log('Colonnes Stripe users OK'))
   .catch(err => console.error('Migration Stripe users:', err));
 
+pool.query(`
+  ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS reset_token VARCHAR(36),
+  ADD COLUMN IF NOT EXISTS reset_token_expires TIMESTAMP
+`).then(() => console.log('Colonnes reset_token OK'))
+  .catch(err => console.error('Migration reset_token:', err));
+
 module.exports = pool;

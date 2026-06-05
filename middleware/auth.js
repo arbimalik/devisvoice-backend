@@ -27,6 +27,8 @@ const PUBLIC_ROUTES = new Set([
   'POST /api/users/login',
   'POST /api/users/verify-token',
   'POST /api/stripe/webhook',
+  'POST /api/users/forgot-password',
+  'POST /api/users/reset-password',
 ]);
 
 module.exports = { requireAuth, PUBLIC_ROUTES };
