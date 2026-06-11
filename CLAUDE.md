@@ -486,6 +486,27 @@ Le **site web** (distinct de l'app artisan) sera construit en **React + Tailwind
 
 ---
 
+## Sécurité — État actuel (juin 2026)
+
+### Protections actives en production
+
+- **Brute force login/register** : `express-rate-limit` 10 req/15 min par IP (`routes/auth.js`)
+- **Spam reset mot de passe** : `express-rate-limit` 5 req/heure par IP sur `/users/forgot-password`
+- **Abus API Claude** : rate limit 20 req/heure par user ID + quotas mensuels par plan
+  - Devis/BDC : gratuit=5, starter=10, pro=illimité
+  - Vox : gratuit=10, starter=20, pro=30
+- **Coût par appel Claude plafonné** : modèle forcé `claude-sonnet-4-6`, max_tokens forcé (4096 devis / 1024 vox) — le frontend ne peut pas outrepasser ces valeurs
+- **Compteur tokens** : colonne `claude_tokens_month` dans `users`, visible dans Railway
+- **JWT_SECRET obligatoire** : le serveur refuse de démarrer si `JWT_SECRET` n'est pas définie en variable d'environnement
+- **Webhook Stripe signé** : `stripe.webhooks.constructEvent()` vérifie la signature — un POST forgé retourne 400
+
+### Différé post-lancement
+
+- **JWT dans localStorage** : vulnérable au XSS — migration vers cookie `HttpOnly` + CSRF token. Touche `authFetch()`, toutes les routes, et tous les formulaires.
+- **Audit logs** : aucune trace des actions — table `audit_logs` (`user_email`, `action`, `detail`, `created_at`) à implémenter.
+
+---
+
 ## Notes de déploiement
 
 - Le serveur démarre avec `node server.js` (`npm start`)
