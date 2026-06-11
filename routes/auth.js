@@ -3,12 +3,21 @@ const pool = require('../db');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { randomUUID } = require('crypto');
+const rateLimit = require('express-rate-limit');
 const JWT_SECRET = process.env.JWT_SECRET || 'devisvoice_secret_2026';
 const { sendEmail } = require('../helpers/email');
 const { buildEmailBienvenue } = require('../helpers/emailBienvenue');
 const BASE_URL = 'https://arbimalik.github.io/devisvoice';
 
-router.post('/users/register', async (req, res) => {
+const authRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { success: false, error: 'Trop de tentatives, réessayez dans 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+router.post('/users/register', authRateLimit, async (req, res) => {
   try {
     const { email, prenom, nom, entreprise, telephone, mot_de_passe, famille, metier, metiers, document_type, plaque, taux_journalier } = req.body;
     if (!email) return res.status(400).json({ success: false, error: 'Email requis' });
@@ -55,7 +64,7 @@ router.post('/users/register', async (req, res) => {
   }
 });
 
-router.post('/users/login', async (req, res) => {
+router.post('/users/login', authRateLimit, async (req, res) => {
   try {
     const { email, mot_de_passe } = req.body;
     if (!email || !mot_de_passe) return res.json({ success: false, error: 'Email et mot de passe requis' });
