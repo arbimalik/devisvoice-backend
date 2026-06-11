@@ -12,7 +12,7 @@ const claudeRateLimit = rateLimit({
 });
 
 const QUOTAS = {
-  devis: { gratuit: 5,  starter: 5, pro: null },
+  devis: { gratuit: 5,  starter: 10, pro: null },
   vox:   { gratuit: 10, starter: 20, pro: 30   }
 };
 const MAX_TOKENS = { devis: 4096, vox: 1024 };
