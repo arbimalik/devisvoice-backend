@@ -147,6 +147,7 @@ router.post('/users/forgot-password', async (req, res) => {
   if (!email) return res.status(400).json({ error: 'Email requis' });
   try {
     const result = await pool.query('SELECT id, prenom FROM users WHERE email=$1', [email]);
+    console.log('[forgot-password] email:', email, '| trouvé:', result.rows.length > 0);
     if (result.rows.length === 0) return res.json({ success: true }); // ne pas révéler si l'email existe
     const user = result.rows[0];
     const token = randomUUID();
