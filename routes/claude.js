@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const pool = require('../db');
-const { rateLimit } = require('express-rate-limit');
+const rateLimit = require('express-rate-limit');
 
 const claudeRateLimit = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 heure
@@ -12,7 +12,7 @@ const claudeRateLimit = rateLimit({
 });
 
 const QUOTAS = {
-  devis: { gratuit: 5,  starter: 15, pro: null },
+  devis: { gratuit: 5,  starter: 5, pro: null },
   vox:   { gratuit: 10, starter: 20, pro: 30   }
 };
 const MAX_TOKENS = { devis: 4096, vox: 1024 };
