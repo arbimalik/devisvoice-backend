@@ -4,7 +4,8 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { randomUUID } = require('crypto');
 const rateLimit = require('express-rate-limit');
-const JWT_SECRET = process.env.JWT_SECRET || 'devisvoice_secret_2026';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) throw new Error('JWT_SECRET non défini — arrêt du serveur');
 const { sendEmail } = require('../helpers/email');
 const { buildEmailBienvenue } = require('../helpers/emailBienvenue');
 const BASE_URL = 'https://arbimalik.github.io/devisvoice';
@@ -13,6 +14,14 @@ const authRateLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   message: { success: false, error: 'Trop de tentatives, réessayez dans 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const forgotRateLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  message: { success: false, error: 'Trop de tentatives, réessayez dans une heure.' },
   standardHeaders: true,
   legacyHeaders: false
 });
@@ -151,7 +160,7 @@ router.post('/users/verify-token', async (req, res) => {
   }
 });
 
-router.post('/users/forgot-password', async (req, res) => {
+router.post('/users/forgot-password', forgotRateLimit, async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'Email requis' });
   try {
