@@ -184,4 +184,13 @@ pool.query(`
 `).then(() => console.log('Colonnes reset_token OK'))
   .catch(err => console.error('Migration reset_token:', err));
 
+pool.query(`
+  ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS claude_calls_devis_month INTEGER DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS claude_calls_vox_month INTEGER DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS claude_tokens_month INTEGER DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS claude_calls_reset_at TIMESTAMP DEFAULT NOW()
+`).then(() => console.log('Colonnes quotas Claude OK'))
+  .catch(err => console.error('Migration quotas Claude:', err));
+
 module.exports = pool;

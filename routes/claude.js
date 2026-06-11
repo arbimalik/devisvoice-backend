@@ -1,22 +1,77 @@
 const router = require('express').Router();
 const pool = require('../db');
+const { rateLimit } = require('express-rate-limit');
 
-router.post('/claude', async (req, res) => {
+const claudeRateLimit = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 heure
+  max: 20,
+  keyGenerator: (req) => req.user.userId,
+  message: { error: 'Trop de requêtes — réessayez dans une heure.', code: 'RATE_LIMITED' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const QUOTAS = {
+  devis: { gratuit: 5,  starter: 15, pro: null },
+  vox:   { gratuit: 10, starter: 20, pro: 30   }
+};
+const MAX_TOKENS = { devis: 4096, vox: 1024 };
+
+async function checkAndIncrementQuota(email, plan, type) {
+  const row = await pool.query(
+    'SELECT claude_calls_devis_month, claude_calls_vox_month, claude_tokens_month, claude_calls_reset_at FROM users WHERE email=$1',
+    [email]
+  );
+  if (!row.rows.length) throw new Error('Utilisateur introuvable');
+  const u = row.rows[0];
+
+  // Reset si nouveau mois
+  const resetAt = new Date(u.claude_calls_reset_at);
+  const now = new Date();
+  const newMonth = resetAt.getFullYear() !== now.getFullYear() || resetAt.getMonth() !== now.getMonth();
+  if (newMonth) {
+    await pool.query(
+      'UPDATE users SET claude_calls_devis_month=0, claude_calls_vox_month=0, claude_tokens_month=0, claude_calls_reset_at=NOW() WHERE email=$1',
+      [email]
+    );
+    u.claude_calls_devis_month = 0;
+    u.claude_calls_vox_month = 0;
+  }
+
+  const planKey = (plan || 'gratuit').toLowerCase();
+  const limit = QUOTAS[type][planKey];
+  const current = type === 'devis' ? u.claude_calls_devis_month : u.claude_calls_vox_month;
+
+  if (limit !== null && current >= limit) {
+    const label = type === 'vox' ? 'messages Vox' : 'appels IA';
+    return { exceeded: true, message: `Limite de ${limit} ${label}/mois atteinte sur votre plan.` };
+  }
+
+  return { exceeded: false };
+}
+
+async function incrementCounters(email, type, tokensUsed) {
+  const col = type === 'devis' ? 'claude_calls_devis_month' : 'claude_calls_vox_month';
+  await pool.query(
+    `UPDATE users SET ${col}=${col}+1, claude_tokens_month=claude_tokens_month+$1 WHERE email=$2`,
+    [tokensUsed, email]
+  );
+}
+
+router.post('/claude', claudeRateLimit, async (req, res) => {
   try {
     const email = req.user.email;
     const userRow = await pool.query('SELECT plan FROM users WHERE email=$1', [email]);
     const plan = (userRow.rows[0]?.plan || 'gratuit').toLowerCase();
-    const DEVIS_LIMITS = { gratuit: 3, starter: 10 };
-    const devisLimit = DEVIS_LIMITS[plan];
-    if (devisLimit !== undefined) {
-      const countRes = await pool.query(
-        "SELECT COUNT(*) AS count FROM devis WHERE artisan_email=$1 AND created_at >= date_trunc('month', NOW()) AND statut != 'fusionné'",
-        [email]
-      );
-      if (parseInt(countRes.rows[0].count) >= devisLimit) {
-        return res.status(403).json({ error: `Limite de ${devisLimit} devis/mois atteinte sur votre plan.`, code: 'QUOTA_EXCEEDED' });
-      }
-    }
+    const type = req.body.type === 'vox' ? 'vox' : 'devis';
+
+    const quota = await checkAndIncrementQuota(email, plan, type);
+    if (quota.exceeded) return res.status(403).json({ error: quota.message, code: 'QUOTA_EXCEEDED' });
+
+    // Forcer modèle et max_tokens
+    const payload = req.body.payload;
+    payload.model = 'claude-sonnet-4-6';
+    payload.max_tokens = Math.min(payload.max_tokens || MAX_TOKENS[type], MAX_TOKENS[type]);
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -25,11 +80,16 @@ router.post('/claude', async (req, res) => {
         'x-api-key': process.env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01'
       },
-      body: JSON.stringify(req.body.payload)
+      body: JSON.stringify(payload)
     });
     const data = await response.json();
+
+    // Incrémenter compteurs après succès
+    const tokensUsed = (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0);
+    await incrementCounters(email, type, tokensUsed);
+
     res.json(data);
-  } catch (err) { res.status(500).json({error: err.message}); }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 router.get('/preferences', async (req, res) => {
