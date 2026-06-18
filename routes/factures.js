@@ -97,7 +97,12 @@ router.get('/factures', async (req, res) => {
   const email = req.user.email;
   try {
     const result = await pool.query(
-      'SELECT id, devis_id, client_nom, numero, statut, libelle, created_at FROM factures WHERE artisan_email=$1 ORDER BY created_at DESC',
+      `SELECT f.id, f.devis_id, f.client_nom, f.numero, f.statut, f.libelle, f.created_at,
+              COALESCE((d.data->>'total_ttc')::numeric, 0) AS montant_ttc
+       FROM factures f
+       LEFT JOIN devis d ON d.id = f.devis_id
+       WHERE f.artisan_email=$1
+       ORDER BY f.created_at DESC`,
       [email]
     );
     res.json(result.rows);
