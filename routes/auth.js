@@ -267,7 +267,10 @@ router.get('/stats', async (req, res) => {
 
     const debutAnnee = new Date(debutMois.getFullYear(), 0, 1);
 
-    const [totalMois, acceptesMois, totalPrecedent, acceptesPrecedent, facturesAttente, derniers, parMois] = await Promise.all([
+    const userRow = await pool.query('SELECT famille FROM users WHERE email=$1', [email]);
+    const isVtc = userRow.rows[0]?.famille === 'transport';
+
+    const queries = [
       pool.query(
         "SELECT COUNT(*) as count FROM devis WHERE artisan_email=$1 AND created_at >= $2 AND statut != 'fusionné'",
         [email, debutMois]
@@ -308,26 +311,46 @@ router.get('/stats', async (req, res) => {
          GROUP BY mois
          ORDER BY mois`,
         [email, debutAnnee]
-      )
-    ]);
+      ),
+      isVtc ? pool.query(
+        'SELECT COALESCE(SUM(montant_ttc),0) as montant, COUNT(*) as count FROM bon_commande WHERE conducteur_email=$1 AND created_at >= $2',
+        [email, debutMois]
+      ) : Promise.resolve({ rows: [{ montant: 0, count: 0 }] }),
+      isVtc ? pool.query(
+        'SELECT COALESCE(SUM(montant_ttc),0) as montant FROM bon_commande WHERE conducteur_email=$1 AND created_at >= $2 AND created_at < $3',
+        [email, debutPrecedent, finPrecedent]
+      ) : Promise.resolve({ rows: [{ montant: 0 }] }),
+      isVtc ? pool.query(
+        `SELECT EXTRACT(MONTH FROM created_at)::int AS mois, COALESCE(SUM(montant_ttc),0) AS montant
+         FROM bon_commande WHERE conducteur_email=$1 AND created_at >= $2
+         GROUP BY mois ORDER BY mois`,
+        [email, debutAnnee]
+      ) : Promise.resolve({ rows: [] })
+    ];
+
+    const [totalMois, acceptesMois, totalPrecedent, acceptesPrecedent, facturesAttente, derniers, parMois, bdcMois, bdcPrec, bdcParMois] = await Promise.all(queries);
 
     const total     = parseInt(totalMois.rows[0].count);
     const acceptes  = parseInt(acceptesMois.rows[0].count);
-    const montant   = parseFloat(acceptesMois.rows[0].montant) || 0;
+    const montant   = (parseFloat(acceptesMois.rows[0].montant) || 0) + (parseFloat(bdcMois.rows[0].montant) || 0);
     const totalPrec = parseInt(totalPrecedent.rows[0].count);
     const acceptesPrec = parseInt(acceptesPrecedent.rows[0].count);
-    const montantPrec  = parseFloat(acceptesPrecedent.rows[0].montant) || 0;
+    const montantPrec  = (parseFloat(acceptesPrecedent.rows[0].montant) || 0) + (parseFloat(bdcPrec.rows[0].montant) || 0);
 
     const moisLabels = ['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
     const parMoisMap = {};
     parMois.rows.forEach(r => { parMoisMap[r.mois] = r; });
+    const bdcParMoisMap = {};
+    bdcParMois.rows.forEach(r => { bdcParMoisMap[r.mois] = r; });
+
     const historique = moisLabels.map((label, i) => {
       const m = parMoisMap[i + 1];
+      const b = bdcParMoisMap[i + 1];
       return {
-        mois: label,
-        total:    m ? parseInt(m.total)    : 0,
+        mois:    label,
+        total:   m ? parseInt(m.total)    : 0,
         acceptes: m ? parseInt(m.acceptes) : 0,
-        montant:  m ? parseFloat(m.montant): 0
+        montant: (m ? parseFloat(m.montant) : 0) + (b ? parseFloat(b.montant) : 0)
       };
     });
 
@@ -342,6 +365,7 @@ router.get('/stats', async (req, res) => {
       taux_precedent:           totalPrec > 0 ? Math.round(acceptesPrec / totalPrec * 100) : 0,
       factures_attente_nb:      parseInt(facturesAttente.rows[0].count),
       factures_attente_montant: parseFloat(facturesAttente.rows[0].montant) || 0,
+      bdc_mois:                 isVtc ? parseInt(bdcMois.rows[0].count) : 0,
       historique,
       derniers:                 derniers.rows
     });
